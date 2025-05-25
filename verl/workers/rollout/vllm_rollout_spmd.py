@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Union
 
@@ -22,6 +23,8 @@ import torch.distributed
 from tensordict import TensorDict
 from transformers import PreTrainedTokenizer
 from vllm import LLM, RequestOutput, SamplingParams
+from tool_server.tf_eval.tool_inferencer.api.vllm_tool_inference import VllmToolInferencer
+
 
 from ...protocol import DataProto
 from ...utils import torch_functional as VF
@@ -59,6 +62,7 @@ class vLLMRollout(BaseRollout):
         super().__init__()
         self.rank = int(os.getenv("RANK", "0"))
         self.config = config
+        self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
         if config.tensor_parallel_size > torch.distributed.get_world_size():
             raise ValueError("Tensor parallelism size should be less than world size.")
@@ -102,6 +106,13 @@ class vLLMRollout(BaseRollout):
 
         print(f"Sampling params: {sampling_kwargs}.")
         self.sampling_params = SamplingParams(**sampling_kwargs)
+        
+        if config.use_tool:
+            self.tool_inferencer = VllmToolInferencer(
+                vllm_model=self.inference_engine,
+            )
+        else:
+            self.tool_inferencer = None
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -175,7 +186,7 @@ class vLLMRollout(BaseRollout):
             response_ids=response_ids, eos_token_id=eos_token_id, dtype=attention_mask.dtype
         )
         attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
-
+        
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
             {
@@ -189,3 +200,146 @@ class vLLMRollout(BaseRollout):
             batch_size=batch_size,
         )
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+    
+    def extract_prompt_and_question(self, text: str):
+        # Regular expression to extract the prompt (content within system and user)
+        prompt_regex = r"system\s*(.*?)\s*user"
+        prompt_match = re.search(prompt_regex, text, re.DOTALL)
+        
+        if prompt_match:
+            prompt = prompt_match.group(1).strip()  # Extract the prompt text
+        else:
+            prompt = None
+        
+        # Regular expression to extract the question, which is the content after 'user'
+        question_regex = r"user\s*(.*?)\nassistant\n"
+        question_match = re.search(question_regex, text, re.DOTALL)
+        
+        if question_match:
+            question = question_match.group(1).strip()  # Extract the question text
+        else:
+            question = None
+        
+        return prompt, question 
+    
+    @torch.no_grad()
+    def generate_sequences_with_tools(self, prompts: DataProto) -> DataProto:
+        assert self.tool_inferencer is not None, "Tool inferencer is not initialized."
+        # left-padded attention_mask
+        input_ids: torch.Tensor = prompts.batch["input_ids"]  # (bs, prompt_length)
+        attention_mask: torch.Tensor = prompts.batch["attention_mask"]
+        position_ids: torch.Tensor = prompts.batch["position_ids"]
+        conversations = prompts.non_tensor_batch.pop("conversation")
+        eos_token_id: int = prompts.meta_info["eos_token_id"]
+        batch_size = input_ids.size(0)
+        
+        non_tensor_batch = prompts.non_tensor_batch
+        if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+            raise RuntimeError("vllm sharding manager is not work properly.")
+
+        if "multi_modal_data" in non_tensor_batch:
+            vllm_inputs = []
+            for raw_prompt_ids, multi_modal_data in zip(
+                non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")
+            ):
+                vllm_inputs.append({"prompt_token_ids": list(raw_prompt_ids), "multi_modal_data": multi_modal_data})
+        else:
+            vllm_inputs = [
+                {"prompt_token_ids": list(raw_prompt_ids)} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
+            ]
+            
+        input_prompts = [self.tokenizer.decode(input_ids[i], skip_special_tokens=True) for i in range(batch_size)]
+        images = [raw_prompt["multi_modal_data"]["image"] for raw_prompt in vllm_inputs]
+        questions = []
+        system_prompts = []
+        for input_prompt in input_prompts:
+            system_prompt, question = self.extract_prompt_and_question(input_prompt)
+            questions.append(question)
+            system_prompts.append(system_prompt)
+        
+        tool_inferencer_input = []
+        for question, image, system_prompt,conv in zip(questions, images, system_prompts, conversations):
+            tool_inferencer_input.append(dict(prompt=question, images=image, system=system_prompt, conversation=conv))
+            
+        
+        # users can customize different sampling_params at different run
+        with self.update_sampling_params(**prompts.meta_info):
+            sample_num = self.sampling_params.n
+            do_sample = sample_num > 1
+            tool_inferencer_output = self.tool_inferencer.inference(
+                inputs = tool_inferencer_input,
+                sampling_params = self.sampling_params,
+                do_sample = do_sample,
+                sample_num = sample_num,
+                tool_log_file = self.config.tool_log_file,
+            )
+            response_ids=[]
+            # response_texts=[]
+            response_text_list = []
+            for samples_dict in tool_inferencer_output:
+                samples = samples_dict["samples"]
+                for sample in samples:
+                    all_model_response_ids = []
+                    response_text_list.append(sample["model_outputs"])
+                   
+                    for model_response_id in sample["model_output_ids"]:
+                        all_model_response_ids.extend(model_response_id)
+                    response_ids.append(all_model_response_ids)
+            response_text_list = np.array(response_text_list, dtype=object)
+            if response_text_list.ndim > 1:
+                debug_text = f"response_text_list shape: {response_text_list.shape},tool_inferencer_output: {tool_inferencer_output}"
+                debug_file = "/mnt/petrelfs/songmingyang/code/reasoning/EasyR1/scripts/logs/error_ndims.txt"
+                with open(debug_file, "w", encoding="utf-8") as f:
+                    f.write(debug_text)
+                response_text_list = response_text_list.flatten()
+                print(debug_text)
+            non_tensor_batch["response_text_list"] = response_text_list
+            # breakpoint()       
+            # completions: List[RequestOutput] = self.inference_engine.generate(
+            #     prompts=vllm_inputs, sampling_params=self.sampling_params, use_tqdm=(self.rank == 0)
+            # )
+            # response_ids = [output.token_ids for completion in completions for output in completion.outputs]
+            response_ids = VF.pad_2d_list_to_length_with_truncation(
+                response_ids, self.pad_token_id, max_length=self.config.max_multi_round_sequence_length, truncate=True,
+            ).to(input_ids.device)
+
+            if sample_num > 1:
+                batch_size = batch_size * sample_num
+                input_ids = _repeat_interleave(input_ids, sample_num)
+                attention_mask = _repeat_interleave(attention_mask, sample_num)
+                position_ids = _repeat_interleave(position_ids, sample_num)
+
+        sequence_ids = torch.cat([input_ids, response_ids], dim=-1)
+        response_length = response_ids.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.view(1, -1).expand(batch_size, -1)
+        if position_ids.dim() == 3:  # qwen2vl mrope
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
+
+        # prompt: left pad + response: right pad
+        # attention_mask: [0,0,0,0,1,1,1,1 | 1,1,1,0,0,0,0,0]
+        # position_ids:   [0,0,0,0,0,1,2,3 | 4,5,6,7,8,9,10,11]
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        response_mask = VF.get_response_mask(
+            response_ids=response_ids, eos_token_id=eos_token_id, dtype=attention_mask.dtype
+        )
+        attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
+        # breakpoint()
+        # all the tp ranks should contain the same data here. data in all ranks are valid
+        batch = TensorDict(
+            {
+                "prompts": input_ids,
+                "responses": response_ids,
+                "input_ids": sequence_ids,  # here input_ids become the whole sentences
+                "attention_mask": attention_mask,
+                "response_mask": response_mask,
+                "position_ids": position_ids,
+            },
+            batch_size=batch_size,
+        )
+        try:
+            return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+        except:
+            breakpoint()
+            return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

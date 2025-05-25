@@ -477,7 +477,6 @@ class FSDPWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
-
         if self._use_param_offload:
             load_fsdp_model(self.fsdp_module)
 
@@ -497,9 +496,12 @@ class FSDPWorker(Worker):
 
             if self._use_optimizer_offload:
                 offload_fsdp_optimizer(optimizer=self.optimizer)
-
+            # breakpoint()
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
+            if self.rollout.config.use_tool:
+                output = self.rollout.generate_sequences_with_tools(prompts=prompts)
+            else:
+                output = self.rollout.generate_sequences(prompts=prompts)
             output = self.rollout_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")

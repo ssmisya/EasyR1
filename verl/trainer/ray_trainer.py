@@ -286,17 +286,21 @@ class RayPPOTrainer:
             if "multi_modal_data" in test_batch.non_tensor_batch.keys():
                 test_gen_batch = test_batch.pop(
                     batch_keys=["input_ids", "attention_mask", "position_ids"],
-                    non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                    non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "conversation"],
                 )
             else:
                 test_gen_batch = test_batch.pop(
                     batch_keys=["input_ids", "attention_mask", "position_ids"],
-                    non_tensor_batch_keys=["raw_prompt_ids"],
+                    non_tensor_batch_keys=["raw_prompt_ids", "conversation"],
                 )
-
+            # breakpoint()
             test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
             test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
+            # if self.config.worker.rollout.use_tool:
+            #     test_output_gen_batch = self.actor_rollout_wg.generate_sequences_with_tools(test_gen_batch)
+            # else:
+            #     test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
             # Store generated outputs
@@ -486,18 +490,22 @@ class RayPPOTrainer:
                 if "multi_modal_data" in batch.non_tensor_batch.keys():
                     gen_batch = batch.pop(
                         batch_keys=["input_ids", "attention_mask", "position_ids"],
-                        non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                        non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "conversation"],
                     )
                 else:
                     gen_batch = batch.pop(
                         batch_keys=["input_ids", "attention_mask", "position_ids"],
-                        non_tensor_batch_keys=["raw_prompt_ids"],
+                        non_tensor_batch_keys=["raw_prompt_ids", "conversation"],
                     )
 
                 with timer("step", timing_raw):
                     # generate a batch
                     with timer("gen", timing_raw):  # wg: worker group
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        # if self.config.worker.rollout.use_tool:
+                        #     gen_batch_output = self.actor_rollout_wg.generate_sequences_with_tools(gen_batch)
+                        # else:
+                        #     gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
                     if self.config.algorithm.adv_estimator == "remax":
                         with timer("gen_max", timing_raw):
@@ -505,6 +513,10 @@ class RayPPOTrainer:
                             gen_baseline_batch.meta_info["temperature"] = 0
                             gen_baseline_batch.meta_info["n"] = 1
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                            # if self.config.worker.rollout.use_tool:
+                            #     gen_baseline_output = self.actor_rollout_wg.generate_sequences_with_tools(gen_baseline_batch)
+                            # else:
+                            #     gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
                             reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(batch))

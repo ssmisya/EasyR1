@@ -211,4 +211,5 @@ class RLHFDataset(Dataset, ImageProcessMixin):
         example["position_ids"] = position_ids
         example["raw_prompt_ids"] = raw_prompt_ids
         example["ground_truth"] = example.pop(self.answer_key)
+        example["conversation"] = messages
         return example

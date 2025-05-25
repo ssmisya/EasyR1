@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from ..single_controller.ray import RayWorkerGroup
 from ..utils.tokenizer import get_processor, get_tokenizer
 from ..workers.fsdp_workers import FSDPWorker
-from ..workers.reward import BatchFunctionRewardManager, SequentialFunctionRewardManager
+from ..workers.reward import BatchFunctionRewardManager, SequentialFunctionRewardManager, ToolBatchFunctionRewardManager
 from .config import PPOConfig
 from .data_loader import create_dataloader
 from .ray_trainer import RayPPOTrainer, ResourcePoolManager, Role
@@ -71,6 +71,8 @@ class Runner:
             RewardManager = SequentialFunctionRewardManager
         elif config.worker.reward.reward_type == "batch":
             RewardManager = BatchFunctionRewardManager
+        elif config.worker.reward.reward_type == "tool_batch":
+            RewardManager = ToolBatchFunctionRewardManager
         else:
             raise NotImplementedError(f"Unknown reward type {config.worker.reward.reward_type}.")
 
@@ -118,6 +120,7 @@ def main():
                 "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
                 "PYTHONUNBUFFERED": "1",
+                "RAY_DEBUG": "1",
             }
         }
         ray.init(runtime_env=runtime_env)

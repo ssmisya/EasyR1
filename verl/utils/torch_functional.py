@@ -136,6 +136,22 @@ def pad_2d_list_to_length(
     tensor = torch.tensor(padded_response)
     return tensor
 
+def pad_2d_list_to_length_with_truncation(
+    response: List[List[int]], pad_token_id: int, max_length: Optional[int] = None, truncate: bool = True
+) -> torch.Tensor:
+    """Pad a 2D list (e.g. responses, log_probs) to a 2D tensor."""
+    max_response_length = max(len(sub_list) for sub_list in response)
+    if max_length is not None and max_length > max_response_length:
+        target_length = max_length
+    else:
+        target_length = max_response_length
+
+    padded_response = [tuple(sub_list) + (pad_token_id,) * (target_length - len(sub_list)) for sub_list in response]
+    tensor = torch.tensor(padded_response)
+    if truncate and tensor.shape[1] > max_length:
+        tensor = tensor[:, :max_length]
+    return tensor
+
 
 def pad_sequence_to_length(
     tensor: torch.Tensor, max_seq_len: int, pad_token_id: int, left_pad: bool = False
