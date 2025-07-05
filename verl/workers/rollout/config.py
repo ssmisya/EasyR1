@@ -45,6 +45,7 @@ class RolloutConfig:
     prompt_length: int = field(default=-1, init=False)
     response_length: int = field(default=-1, init=False)
     trust_remote_code: bool = field(default=False, init=False)
+    tool_controller_addr: str = field(default='http://SH-IDC1-10-140-37-6:21112', init=False)
 
     def to_dict(self):
         return asdict(self)

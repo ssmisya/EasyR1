@@ -86,7 +86,7 @@ class WandbLogger(Logger):
         wandb.init(
             project=config["trainer"]["project_name"],
             name=config["trainer"]["experiment_name"],
-            config=config,
+            config=config
         )
 
     def log(self, data: Dict[str, Any], step: int) -> None:

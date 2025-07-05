@@ -285,7 +285,7 @@ class vLLMRollout(BaseRollout):
                 samples = samples_dict["samples"]
                 for sample in samples:
                     all_model_response_ids = []
-                    response_text_list.append(sample["model_outputs"]) # 每一步添加的都是一个列表，其中可能有1个或者多个字符串
+                    response_text_list.append(sample["model_outputs"])
                    
                     for model_response_id in sample["model_output_ids"]:
                         all_model_response_ids.extend(model_response_id)
@@ -297,7 +297,6 @@ class vLLMRollout(BaseRollout):
                 with open(debug_file, "w", encoding="utf-8") as f:
                     f.write(debug_text)
                 response_text_list = response_text_list.flatten()
-            # print("response_text_list的维度为：",response_text_list.shape)
             non_tensor_batch["response_text_list"] = response_text_list
             # breakpoint()       
             # completions: List[RequestOutput] = self.inference_engine.generate(
@@ -348,31 +347,13 @@ class vLLMRollout(BaseRollout):
         if hasattr(self, 'tool_inferencer') and self.tool_inferencer is not None:
             # 获取工具统计数据
             tool_stats_dict = self.tool_inferencer.tool_stats.get_stats_dict()
-            # print("vllm_rollout_spmd.py的tool_stats_dict为：", tool_stats_dict)
             
             # 将单个统计字典复制为批处理大小的列表
-            # print("vllm_rollout_spmd.py的batch_size为：", batch_size)
             batch_tool_stats = [tool_stats_dict] * batch_size
             non_tensor_batch["tool_stats"] = np.array(batch_tool_stats, dtype=object)
 
             # 不进行复制
             # non_tensor_batch["tool_stats"] = np.array([tool_stats_dict], dtype=object)
-            
-        # 添加工具调用的tool_rewards信息，收集每个样本的工具调用tool_rewards
-        tool_rewards = []
-        
-
-        # 先测试，目前这样应该是可以跑了
-        for samples_dict in tool_inferencer_output:
-            samples = samples_dict["samples"]
-            # 每一个sample都应该有tool_rewards
-            for sample in samples:
-                tool_rewards.append(sample["tool_rewards"])
-        tool_rewards = np.array(tool_rewards, dtype=object)
-        if tool_rewards.ndim > 1:
-            tool_rewards = tool_rewards.flatten()
-
-        non_tensor_batch["tool_rewards"] = np.array(tool_rewards, dtype=object)
             
         try:
             return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

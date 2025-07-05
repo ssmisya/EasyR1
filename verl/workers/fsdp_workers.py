@@ -508,6 +508,36 @@ class FSDPWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences_with_tools(self, prompts: DataProto):
+        assert self._is_rollout
+        if self._use_param_offload:
+            load_fsdp_model(self.fsdp_module)
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+        with self.rollout_sharding_manager:
+            # after parameters sync with rollout, offload actor model to CPU
+            if self._use_param_offload:
+                offload_fsdp_model(self.fsdp_module)
+
+            if self._use_optimizer_offload:
+                offload_fsdp_optimizer(optimizer=self.optimizer)
+                
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            output = self.rollout.generate_sequences_with_tools(prompts=prompts)
+            output = self.rollout_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_probs(self, data: DataProto):
         assert self._is_actor
         data = data.to(torch.cuda.current_device())

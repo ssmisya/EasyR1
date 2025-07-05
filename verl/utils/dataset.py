@@ -114,9 +114,17 @@ class RLHFDataset(Dataset, ImageProcessMixin):
 
         if os.path.isdir(data_path):
             # when we use dataset builder, we should always refer to the train split
-            self.dataset = load_dataset("parquet", data_dir=data_path, split="train")
+            # 只取前50条数据
+            self.dataset = load_dataset("parquet", data_dir=data_path, split=data_split)
+            if data_split == "train":
+                # self.dataset = self.dataset.select(range(1024))
+                self.dataset = self.dataset
+            elif data_split == "validation":
+                # self.dataset = self.dataset.select(range(512))
+                self.dataset = self.dataset
+            print(f"@{data_split}读取的数据集长度",len(self.dataset))
         elif os.path.isfile(data_path):
-            self.dataset = load_dataset("parquet", data_files=data_path, split="train")
+            self.dataset = load_dataset("parquet", data_files=data_path, split=data_split)
         else:
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)
@@ -133,7 +141,7 @@ class RLHFDataset(Dataset, ImageProcessMixin):
         prompt_str: str = example[self.prompt_key]
         if self.format_prompt:
             format_prompt = Template(self.format_prompt.strip())
-            prompt_str = format_prompt.render(content=prompt_str)
+            prompt_str = format_prompt.render(content=prompt_str) # 将prompt_str作为content的值
 
         if self.image_key in example:
             # https://huggingface.co/docs/transformers/en/tasks/image_text_to_text
@@ -145,9 +153,9 @@ class RLHFDataset(Dataset, ImageProcessMixin):
                 if content:
                     content_list.append({"type": "text", "text": content})
 
-            return [{"role": "user", "content": content_list}]
+            return [{"role": "role", "content": content_list}]
         else:
-            return [{"role": "user", "content": prompt_str}]
+            return [{"role": "role", "content": prompt_str}]
 
     def _filter_overlong_prompts(self, example: Dict[str, Any]) -> bool:
         messages = self._build_messages(example)

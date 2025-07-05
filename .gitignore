@@ -174,5 +174,6 @@ cython_debug/
 outputs/
 checkpoints/
 wandb/
+/examples/wandb
 scripts/*
 !scripts/model_merger.py

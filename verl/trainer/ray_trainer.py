@@ -46,6 +46,39 @@ from . import core_algos
 from .config import PPOConfig
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
 
+def merge_unique_dicts(dict_list):
+    """
+    从字典列表中提取所有不同的字典，并将它们合并。
+    对于共同拥有的key，将value值相加。
+    
+    参数:
+        dict_list: 包含字典的列表
+        
+    返回:
+        合并后的字典
+    """
+    # 用于存储已经见过的唯一字典
+    unique_dicts = []
+    
+    # 找出所有唯一的字典
+    for d in dict_list:
+        if d not in unique_dicts:
+            unique_dicts.append(d)
+    
+    # 如果没有唯一字典，返回空字典
+    if not unique_dicts:
+        return {}
+    
+    # 合并所有唯一字典
+    result = {}
+    for d in unique_dicts:
+        for key, value in d.items():
+            if key in result:
+                result[key] += value
+            else:
+                result[key] = value
+    
+    return result
 
 class Role(IntEnum):
     """
@@ -296,11 +329,10 @@ class RayPPOTrainer:
             # breakpoint()
             test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
-            test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
-            # if self.config.worker.rollout.use_tool:
-            #     test_output_gen_batch = self.actor_rollout_wg.generate_sequences_with_tools(test_gen_batch)
-            # else:
-            #     test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
+            if self.config.worker.rollout.use_tool:
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences_with_tools(test_gen_batch)
+            else:
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_gen_batch)
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
             # Store generated outputs
@@ -321,10 +353,22 @@ class RayPPOTrainer:
             for key, value in reward_metrics.items():
                 reward_metrics_lst[key].extend(value)
 
+            # 收集验证过程中的工具调用统计
+            val_tool_metrics = {}
+            if "tool_stats" in test_output_gen_batch.non_tensor_batch:
+                # 工具统计现在是一个数组，每个元素都是相同的字典
+                # 我们只需要取第一个元素即可（只提取第一个是错误的，大错特错）
+                # tool_stats = test_output_gen_batch.non_tensor_batch.pop("tool_stats")[0]
+                tool_stats = merge_unique_dicts(test_output_gen_batch.non_tensor_batch["tool_stats"])
+                tool_stats = {'tool_total_success_rate': tool_stats['tool_successful_calls'] / tool_stats['tool_total_calls']} | tool_stats
+                # 将工具统计添加到val_tool_metrics中，添加前缀以便在wandb中区分
+                for key, value in tool_stats.items():
+                    val_tool_metrics[f"val/tool_{key}"] = value
+
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
-        return {"val/reward_score": reward_score, **val_reward_metrics}
+        return {"val/reward_score": reward_score, **val_reward_metrics, **val_tool_metrics}
 
     def init_workers(self) -> None:
         """Init resource pool and worker group"""
@@ -501,37 +545,33 @@ class RayPPOTrainer:
                 with timer("step", timing_raw):
                     # generate a batch
                     with timer("gen", timing_raw):  # wg: worker group
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        # if self.config.worker.rollout.use_tool:
-                        #     gen_batch_output = self.actor_rollout_wg.generate_sequences_with_tools(gen_batch)
-                        # else:
-                        #     gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        if self.config.worker.rollout.use_tool:
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences_with_tools(gen_batch)
+                        else:
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
-                    if self.config.algorithm.adv_estimator == "remax":
-                        with timer("gen_max", timing_raw):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["temperature"] = 0
-                            gen_baseline_batch.meta_info["n"] = 1
-                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                            # if self.config.worker.rollout.use_tool:
-                            #     gen_baseline_output = self.actor_rollout_wg.generate_sequences_with_tools(gen_baseline_batch)
-                            # else:
-                            #     gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(batch))
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-                            del gen_baseline_batch, gen_baseline_output
+                        # 如果存在工具调用统计，将其提取并添加到metrics中
+                        if "tool_stats" in gen_batch_output.non_tensor_batch:
+                            # 工具统计现在是一个数组，每个元素都是相同的字典
+                            # 我们只需要取第一个元素即可
+                            # print("ray_trainer.py中的gen_batch_output.non_tensor_batch中的tool_stats的长度为：", len(gen_batch_output.non_tensor_batch["tool_stats"]))
+                            # print("ray_trainer.py中的gen_batch_output.non_tensor_batch中的tool_stats为：", gen_batch_output.non_tensor_batch["tool_stats"])
+                            # 合并所有唯一的字典
+                            tool_stats = merge_unique_dicts(gen_batch_output.non_tensor_batch["tool_stats"])
+                            # print("合并之后的tool_stats为：", tool_stats)
+                            tool_stats = {'tool_total_success_rate': tool_stats['tool_successful_calls'] / tool_stats['tool_total_calls']} | tool_stats
+                            # 将工具统计添加到metrics中，添加前缀以便在wandb中区分
+                            for key, value in tool_stats.items():
+                                metrics[f"tool/{key}"] = value
 
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
-                    # repeat to align with repeated responses in rollout
+                    # 将批次数据重复多次，interleave=True参数表示采用交错方式重复，即如果原始数据是[A,B,C]且n=2，结果将是[A,A,B,B,C,C]
                     batch = batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
+                    # 将生成数据与原始数据合并，批次中就同时包含了输入和对应的生成输出，形成完整的训练样本。
                     batch = batch.union(gen_batch_output)
+                    # 移除多模态数据
                     batch.non_tensor_batch.pop("multi_modal_data", None)
 
                     # balance the number of valid tokens on each dp rank.
@@ -542,9 +582,11 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+
                     # compute reward
                     with timer("reward", timing_raw):
                         reward_ref = self.reward_fn.compute_reward.remote(batch)
+                    # breakpoint()
 
                     # recompute old_log_probs
                     with timer("old", timing_raw):

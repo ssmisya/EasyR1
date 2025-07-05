@@ -26,17 +26,16 @@ from transformers import PreTrainedTokenizer
 from ...protocol import DataProto
 from .config import RewardConfig
 
-# 这里要修改
+
 class RewardScore(TypedDict):
     overall: float
     format: Optional[float]
     accuracy: Optional[float]
-    tool: Optional[float]
 
 
 SequentialRewardFunction = Callable[[str, str], RewardScore]
 
-BatchRewardFunction = Callable[[List[str], List[str], List[List[float]]], List[RewardScore]]
+BatchRewardFunction = Callable[[List[str], List[str]], List[RewardScore]]
 
 
 class FunctionRewardManager(ABC):
@@ -123,7 +122,8 @@ class ToolBatchFunctionRewardManager(FunctionRewardManager):
     reward_fn: BatchRewardFunction
 
     def compute_reward(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
-        response_str, ground_truth, tool_rewards = [], [], []
+        # breakpoint()
+        response_str, ground_truth = [], []
         response_ids = data.batch["responses"]
         response_length = data.batch["response_mask"].sum(dim=-1)
         for i in range(len(data)):
@@ -133,10 +133,8 @@ class ToolBatchFunctionRewardManager(FunctionRewardManager):
             # )
             response_str.append(data.non_tensor_batch["response_text_list"][i])
             ground_truth.append(data.non_tensor_batch["ground_truth"][i])
-            tool_rewards.append(data.non_tensor_batch["tool_rewards"][i])
-        # print("在function中的ground_truth",ground_truth)
-        # print("在function中的tool_rewards", tool_rewards)
-        scores = self.reward_fn(response_str, ground_truth, tool_rewards)
+
+        scores = self.reward_fn(response_str, ground_truth)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
         for i, score in enumerate(scores):
