@@ -175,7 +175,7 @@ def main():
                     include_dashboard=True,
                     runtime_env=runtime_env,
                     _node_ip_address="127.0.0.1",  # 强制使用本地回环地址
-                    _redis_max_memory=None,  # 禁用Redis内存限制
+                    # _redis_max_memory=None,  # 禁用Redis内存限制
                     _plasma_directory=None,  # 使用默认临时目录
                     _memory=None,  # 不限制内存使用
                     _temp_dir=None,  # 使用默认临时目录
@@ -193,7 +193,7 @@ def main():
                     include_dashboard=True,
                     runtime_env=runtime_env,
                     _node_ip_address="127.0.0.1",  # 强制使用本地回环地址
-                    _redis_max_memory=None,  # 禁用Redis内存限制
+                    # _redis_max_memory=None,  # 禁用Redis内存限制
                     _plasma_directory=None,  # 使用默认临时目录
                     _memory=None,  # 不限制内存使用
                     _temp_dir=None,  # 使用默认临时目录

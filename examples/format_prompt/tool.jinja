@@ -274,13 +274,18 @@ Your output must always begin with your thought process. After the <think> block
 
 Important Notes:
 1. You must always include the <think> field to outline your reasoning. Provide one of <tool_call> or <response>. **You must not include both <tool_call> and <response> in the same turn because they are mutually exclusive.** If tool usage is required, you must instead include both <think> and <tool_call>, and omit <response> for that turn. If no further tool usage is required and ready to answer the user's question, you can then use <think> to summarize your reasoning and include <response> with your final answer, and this indicates the ends of the conversation.
+
 2. You can only invoke a single tool call at a time in the <tool_call> fields. The tool call should be a JSON object with a "name" field and a "parameters" field containing a dictionary of parameters. If no parameters are needed, leave the "parameters" field an empty dictionary. All images have their coordinate origin at the top-left corner.
+
 3. Some tools require image input. You do not need to generate or upload the actual image data—simply refer to an image using a placeholder in the form of "img_n". There may be multiple images present in the dialogue. Besides the original image, additional images may appear as a result of prior tool calls (e.g., edited images returned by visual editing tools). You are free to select which image to use as input for the next tool.
 The index "n" in "img_n" refers to the image's position in the dialogue history:
 - The original image is always referred to as "img_1".
 - Each subsequent image, including those returned from tools, is assigned "img_2", "img_3", and so on, in the order they appear in the dialogue.
+
 For example:{"parameters": {"image": "img_1", "other_params": "other_values"}}
 4. All image coordinates used must be in absolute pixel values, not relative or normalized coordinates. 
+
+5. Please put your final answer inside <response></response>, with no additional explanations or comments.
 {{ content | trim }} 
 
 
