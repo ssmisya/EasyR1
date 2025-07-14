@@ -1,5 +1,5 @@
 source ~/.bashrc
-source ~/miniconda3/bin/activate visual
+source ~/miniconda3/bin/activate visual ###
 
 # environment variables
 export OMP_NUM_THREADS=4
