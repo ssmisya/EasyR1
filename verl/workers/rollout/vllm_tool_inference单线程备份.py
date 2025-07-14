@@ -5,7 +5,6 @@ import time
 import fcntl
 import os
 import datetime
-import concurrent.futures  # 添加并发处理库
 
 from vllm import LLM, SamplingParams
 from typing import List, Union, Dict, Optional, Tuple
@@ -506,7 +505,7 @@ class VllmToolInferencer(object):
         tool_timeout_sec: int
     ) -> List[Tuple[int, Dict, Dict]]:
         """
-        并行处理多个工具调用
+        顺序处理多个工具调用（不使用并发）
         
         参数:
             input_data: 输入数据列表
@@ -514,14 +513,14 @@ class VllmToolInferencer(object):
             tool_cfgs: 工具配置列表
             tool_retry_num: 重试次数
             tool_retry_interval: 重试间隔
-            tool_timeout_sec: 超时时间
+            tool_timeout_sec: 超时时间（已不再使用）
             
         返回:
             包含(索引, 工具配置, 工具结果)的元组列表
         """
-        tool_tasks = []
+        results = []
         
-        # 收集所有需要调用的工具任务
+        # 顺序处理每个工具调用
         for i, idx in enumerate(input_idxs):
             if tool_cfgs[i] is not None:
                 try:
@@ -556,50 +555,22 @@ class VllmToolInferencer(object):
                             # 如果不是img_n格式，也设置成None
                             api_params["image"] = None
                     
-                    # 添加到任务列表
-                    tool_tasks.append((idx, tool_cfgs[i], api_name, api_params))
-                    
-                except Exception as e:
-                    # 处理错误，跳过这个工具调用
-                    continue
-        
-        results = []
-        
-        # 使用线程池并行执行所有工具调用
-        tool_tasks_num = max(2, len(tool_tasks)) # 防止tool_tasks为空
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, tool_tasks_num)) as executor:
-            try:
-                # 提交所有任务
-                future_to_task = {
-                    executor.submit(
-                        self.call_tool_with_retry, 
+                    # 直接调用工具并获取结果（顺序处理）
+                    tool_result = self.call_tool_with_retry(
                         api_name, 
                         api_params, 
                         tool_retry_num, 
                         tool_retry_interval, 
                         tool_timeout_sec
-                    ): (idx, cfg) 
-                    for idx, cfg, api_name, api_params in tool_tasks
-                }
-                
-                # 收集所有结果
-                for future in concurrent.futures.as_completed(future_to_task):
-                    idx, cfg = future_to_task[future]
-                    try:
-                        tool_result = future.result()
-                        results.append((idx, cfg, tool_result))
-                    except Exception as e:
-                        # 处理异常情况
-                        tool_result = {"text": f"Failed to call tool: {str(e)}", "error_code": 1}
-                        results.append((idx, cfg, tool_result))
-            except Exception as e:
-                print(f"Error in thread pool execution: {e}")
-            finally:
-                # 确保所有任务都被取消
-                executor.shutdown(wait=False)
-                for future in future_to_task:
-                    if not future.done():
-                        future.cancel()
+                    )
+                    
+                    # 将结果添加到列表
+                    results.append((idx, tool_cfgs[i], tool_result))
+                    
+                except Exception as e:
+                    # 处理异常情况
+                    tool_result = {"text": f"Failed to call tool: {str(e)}", "error_code": 1}
+                    results.append((idx, tool_cfgs[i], tool_result))
         
         return results
 
@@ -686,11 +657,16 @@ class VllmToolInferencer(object):
                     images = [images]
                     
             # 处理对话输入
+            # 有用的只有item["conversation"]，prompt和system是断了的系统prompt
+            # print(f"啊啊啊啊item: {item}")
             conversation = list(item["conversation"])
+            # print(f"啊啊啊啊conversation: {conversation}")
+            # conversation[0]["content"]中有需要的全部内容，第一个text是系统prompt，第二个是image，第三个是text是问题
             first_content = conversation[0]["content"]
             new_first_content = []
             img_idx = 0
             # 处理第一条消息中的文本和图像
+            # print(f"啊啊啊啊first_content: {first_content}")
             for c in first_content:
                 if c["type"] == "text":
                     new_first_content.append(c)
@@ -699,6 +675,7 @@ class VllmToolInferencer(object):
                     image_base64 = pil_to_base64(image, url_format=True)
                     new_first_content.append({"type": "image_url", "image_url": {"url": image_base64}})
                     img_idx += 1
+            # print(f"啊啊啊啊new_first_content: {new_first_content}")
             prompt = new_first_content[-1]["text"]
             conversation[0]['role'] = 'user'
             conversation[0]["content"] = new_first_content[1:]
@@ -818,7 +795,6 @@ class VllmToolInferencer(object):
                         item_id = id(input_data[input_idx])
                         if item_id in self.image_history:
                             del self.image_history[item_id]
-                        tool_cfgs_list.append(None)
                         continue
 
                     # 提取工具调用信息
@@ -834,10 +810,90 @@ class VllmToolInferencer(object):
                             "API_name": tool_name,
                             "API_params": tool_params
                         }]
-                        tool_cfgs_list.append(tool_cfg)
+                        
+                        # 顺序处理每个工具调用 - 立即调用工具
+                        try:
+                            # 获取工具名称和参数
+                            api_name = tool_name
+                            api_params = tool_params.copy()
+                            
+                            # 工具名称映射表
+                            tool_name_list = ['SegmentRegionAroundPoint', 'Point', 'OCR','DrawLine','Crop','GroundingDINO','LanguageModel','DrawLine','DrawShape','HighlightBox','MaskBox','GetSubplotInfo','GetBarInfo']
+                            if api_name not in tool_name_list:
+                                # 如果工具名称不在映射表中，则跳过
+                                continue
+                            
+                            item_id = id(input_data[input_idx])
+                            
+                            # 处理图像参数
+                            if "image" in api_params:
+                                img_key = api_params.get("image", "")
+                                # 如果是img_n格式，则从图像历史中获取对应图像
+                                if isinstance(img_key, str) and img_key.startswith("img_"):
+                                    if item_id in self.image_history and img_key in self.image_history[item_id]:
+                                        image = self.image_history[item_id][img_key]
+                                        # 转换为base64格式
+                                        image_base64 = pil_to_base64(image, url_format=False)
+                                        # 更新参数中的图像
+                                        api_params["image"] = image_base64
+                                    else:
+                                        # 如果找不到指定图像，设置为None
+                                        api_params["image"] = None
+                                else:
+                                    # 如果不是img_n格式，也设置成None
+                                    api_params["image"] = None
+                            
+                            # 直接调用工具并获取结果
+                            tool_result = self.call_tool_with_retry(
+                                api_name, 
+                                api_params, 
+                                tool_retry_num, 
+                                tool_retry_interval, 
+                                tool_timeout_sec
+                            )
+                            
+                            # 记录工具配置和输出
+                            input_data[input_idx]["tool_cfgs"].append(tool_cfg)
+                            input_data[input_idx]["tool_outputs"].append(tool_result)
+                            
+                            # 获取调用状态
+                            status = tool_result.get("status", "")
+                            error_code = tool_result.get("error_code", -1)
+                            # 将tool_reward添加到工具调用奖励列表中
+                            if tool_result.get("tool_reward") is not None:
+                                input_data[input_idx]["tool_rewards"].append(tool_result.get("tool_reward"))
+                            call_status = "success" if (status == "success" or error_code == 0) else "failed"
+                            
+                            # 更新工具调用统计
+                            self.tool_stats.add_call(call_status == "success", api_name)
+                            
+                            # 处理工具结果并更新对话
+                            updated_conversations = self.handle_tool_result(
+                                cfg=tool_cfg[0],
+                                tool_result=tool_result,
+                                conversations=input_data[input_idx]["conversations"],
+                                model_mode="general",
+                                original_prompt=input_data[input_idx]["prompt"],
+                                input_data_item=input_data[input_idx]
+                            )
+                            
+                            # 更新对话
+                            input_data[input_idx]["conversations"] = updated_conversations
+                            
+                        except Exception as e:
+                            # 处理异常情况
+                            tool_result = {"text": f"Failed to call tool: {str(e)}", "error_code": 1}
+                            input_data[input_idx]["tool_cfgs"].append(tool_cfg)
+                            input_data[input_idx]["tool_outputs"].append(tool_result)
+                            input_data[input_idx]["tool_rewards"].append(0.0)
+                            
+                            # 如果工具调用失败，将原始提示添加到对话中
+                            input_data[input_idx]["conversations"] = self.append_conversation_fn(
+                                conversation=input_data[input_idx]["conversations"], 
+                                text=input_data[input_idx]["prompt"], 
+                                role="user"
+                            )
                     else:
-                        tool_cfg = None
-                        tool_cfgs_list.append(None)
                         # 如果模型输出中没有工具调用，则将工具调用奖励设置为0
                         input_data[input_idx]["tool_rewards"].append(0.0)
                         
@@ -848,49 +904,6 @@ class VllmToolInferencer(object):
                             role="user"
                         )
                 
-                # 并行处理所有工具调用
-                tool_results = self.process_tool_calls(
-                    input_data=input_data,
-                    input_idxs=input_idxs,
-                    tool_cfgs=tool_cfgs_list,
-                    tool_retry_num=tool_retry_num,
-                    tool_retry_interval=tool_retry_interval,
-                    tool_timeout_sec=tool_timeout_sec
-                )
-                
-                # 处理工具调用结果
-                for idx, tool_cfg, tool_result in tool_results:
-                    # 记录工具配置和输出
-                    input_data[idx]["tool_cfgs"].append(tool_cfg)
-                    input_data[idx]["tool_outputs"].append(tool_result)
-                    
-                    # 获取API名称
-                    api_name = tool_cfg[0].get("API_name", "未知工具")
-                    
-                    # 获取调用状态
-                    status = tool_result.get("status", "")
-                    error_code = tool_result.get("error_code", -1)
-                    # 将tool_reward添加到工具调用奖励列表中
-                    if tool_result.get("tool_reward") is not None:
-                        input_data[idx]["tool_rewards"].append(tool_result.get("tool_reward"))
-                    call_status = "success" if (status == "success" or error_code == 0) else "failed"
-                    
-                    # 更新工具调用统计
-                    self.tool_stats.add_call(call_status == "success", api_name)
-                    
-                    # 处理工具结果并更新对话
-                    updated_conversations = self.handle_tool_result(
-                        cfg=tool_cfg[0],
-                        tool_result=tool_result,
-                        conversations=input_data[idx]["conversations"],
-                        model_mode="general",
-                        original_prompt=input_data[idx]["prompt"],
-                        input_data_item=input_data[idx]
-                    )
-                    
-                    # 更新对话
-                    input_data[idx]["conversations"] = updated_conversations
-                    
             # 记录工具输出到日志文件
             if tool_log_file is not None:
                 for item in input_data:

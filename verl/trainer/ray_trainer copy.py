@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -38,6 +38,9 @@ from ..single_controller.ray.base import create_colocated_worker_cls
 from ..utils import torch_functional as VF
 from ..utils.checkpoint import CHECKPOINT_TRACKER, remove_obsolete_ckpt
 from ..utils.logger import Tracker
+# ----------------- [新添加的导入] -----------------
+from ..utils.model_utils import print_gpu_memory_usage
+# -----------------------------------------------
 from ..utils.py_functional import convert_dict_to_str, timer
 from ..utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from ..workers.fsdp_workers import FSDPWorker
@@ -221,7 +224,6 @@ class RayPPOTrainer:
         self.val_reward_fn = val_reward_fn
 
         self.hybrid_engine = config.worker.hybrid_engine
-        # 不知道在哪设置的，但是是True
         if self.hybrid_engine:
             assert Role.ActorRollout in role_worker_mapping, (
                 f"ActorRollout should be included in {role_worker_mapping.keys()}."
@@ -235,7 +237,6 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
 
         # define KL control
-        # disable_kl 设置的是false，但是我记得现在好像grpo都不使用kl了
         if Role.RefPolicy in role_worker_mapping and not config.algorithm.disable_kl:
             self.use_reference_policy = True
             self.kl_ctrl = core_algos.get_kl_controller(config.algorithm)
@@ -358,6 +359,9 @@ class RayPPOTrainer:
             # 收集验证过程中的工具调用统计
             val_tool_metrics = {}
             if "tool_stats" in test_output_gen_batch.non_tensor_batch:
+                # 工具统计现在是一个数组，每个元素都是相同的字典
+                # 我们只需要取第一个元素即可（只提取第一个是错误的，大错特错）
+                # tool_stats = test_output_gen_batch.non_tensor_batch.pop("tool_stats")[0]
                 tool_stats = merge_unique_dicts(test_output_gen_batch.non_tensor_batch["tool_stats"])
                 if tool_stats['tool_total_calls'] > 0:
                     tool_stats = {'tool_total_success_rate': tool_stats['tool_successful_calls'] / tool_stats['tool_total_calls']} | tool_stats
@@ -526,6 +530,10 @@ class RayPPOTrainer:
                 self.global_step += 1
                 if self.global_step > self.training_steps:
                     break
+                
+                # ----------------- [宏观定位逻辑] -----------------
+                print_gpu_memory_usage(f"Step {self.global_step}: Start of the loop")
+                # -----------------------------------------------
 
                 metrics, timing_raw = {}, {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -560,6 +568,10 @@ class RayPPOTrainer:
                             # 将工具统计添加到metrics中，添加前缀以便在wandb中区分
                             for key, value in tool_stats.items():
                                 metrics[f"tool/{key}"] = value
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    print_gpu_memory_usage(f"Step {self.global_step}: After vLLM generation")
+                    # -----------------------------------------------
 
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
@@ -589,18 +601,32 @@ class RayPPOTrainer:
                     with timer("old", timing_raw):
                         old_log_probs = self.actor_rollout_wg.compute_log_probs(batch)
                         batch = batch.union(old_log_probs)
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    print_gpu_memory_usage(f"Step {self.global_step}: After computing old log_probs")
+                    # -----------------------------------------------
 
                     # compute ref_log_probs
                     if self.use_reference_policy:
                         with timer("ref", timing_raw):
                             ref_log_probs = self.ref_policy_wg.compute_ref_log_probs(batch)
                             batch = batch.union(ref_log_probs)
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    if self.use_reference_policy:
+                        print_gpu_memory_usage(f"Step {self.global_step}: After computing ref log_probs")
+                    # -----------------------------------------------
 
                     # compute values
                     if self.use_critic:
                         with timer("values", timing_raw):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
+
+                    # ----------------- [宏观定位逻辑] -----------------
+                    if self.use_critic:
+                        print_gpu_memory_usage(f"Step {self.global_step}: After computing critic values")
+                    # -----------------------------------------------
 
                     with timer("adv", timing_raw):
                         # get token level scores
@@ -624,6 +650,10 @@ class RayPPOTrainer:
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                         )
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    print_gpu_memory_usage(f"Step {self.global_step}: After advantage computation")
+                    # -----------------------------------------------
 
                     # update critic
                     if self.use_critic:
@@ -632,6 +662,11 @@ class RayPPOTrainer:
 
                         critic_metrics = reduce_metrics(critic_output.non_tensor_batch)
                         metrics.update(critic_metrics)
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    if self.use_critic:
+                        print_gpu_memory_usage(f"Step {self.global_step}: After critic update")
+                    # -----------------------------------------------
 
                     # update actor
                     if self.config.trainer.critic_warmup <= self.global_step:
@@ -640,6 +675,10 @@ class RayPPOTrainer:
 
                         actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                         metrics.update(actor_metrics)
+                    
+                    # ----------------- [宏观定位逻辑] -----------------
+                    print_gpu_memory_usage(f"Step {self.global_step}: After actor update")
+                    # -----------------------------------------------
 
                     # validate
                     if (
@@ -663,6 +702,18 @@ class RayPPOTrainer:
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, num_gpus=num_gpus))
 
                 self.logger.log(data=metrics, step=self.global_step)
+                
+                # ----------------- [宏观定位逻辑] -----------------
+                # 使用 del 显式删除大对象，并提示垃圾回收
+                del batch, gen_batch, old_log_probs, gen_batch_output
+                if 'ref_log_probs' in locals(): del ref_log_probs
+                if 'values' in locals(): del values
+                if 'actor_output' in locals(): del actor_output
+                if 'critic_output' in locals(): del critic_output
+                
+                print_gpu_memory_usage(f"Step {self.global_step}: End of loop, before next step")
+                # -----------------------------------------------
+
 
         # perform validation after training
         if self.val_reward_fn is not None:
@@ -678,4 +729,3 @@ class RayPPOTrainer:
 
         if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
             self._save_checkpoint()
-

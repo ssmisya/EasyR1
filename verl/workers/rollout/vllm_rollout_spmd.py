@@ -271,16 +271,20 @@ class vLLMRollout(BaseRollout):
         with self.update_sampling_params(**prompts.meta_info):
             sample_num = self.sampling_params.n
             do_sample = sample_num > 1
+            # print(f"啊啊啊啊tool_inferencer_input: {tool_inferencer_input}")
             tool_inferencer_output = self.tool_inferencer.inference(
                 inputs = tool_inferencer_input,
                 sampling_params = self.sampling_params,
                 do_sample = do_sample,
                 sample_num = sample_num,
                 tool_log_file = self.config.tool_log_file,
+                conversation_log_name = self.config.conversation_log_name
             )
             response_ids=[]
             # response_texts=[]
             response_text_list = []
+            # print("啊啊啊啊tool_inferencer_output的维度为：",len(tool_inferencer_output))
+            # print("啊啊啊啊tool_inferencer_output的内容为：",tool_inferencer_output) # 会打印图片
             for samples_dict in tool_inferencer_output:
                 samples = samples_dict["samples"]
                 for sample in samples:
@@ -291,13 +295,16 @@ class vLLMRollout(BaseRollout):
                         all_model_response_ids.extend(model_response_id)
                     response_ids.append(all_model_response_ids)
             response_text_list = np.array(response_text_list, dtype=object)
+            # print("啊啊啊啊response_text_list的维度为：",response_text_list.shape)
+            # print("啊啊啊啊response_text_list的内容为：",response_text_list)
             if response_text_list.ndim > 1:
                 debug_text = f"response_text_list shape: {response_text_list.shape},tool_inferencer_output: {tool_inferencer_output}"
                 debug_file = "/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs/error_ndims.txt"
                 with open(debug_file, "w", encoding="utf-8") as f:
                     f.write(debug_text)
                 response_text_list = response_text_list.flatten()
-            # print("response_text_list的维度为：",response_text_list.shape)
+            # print("啊啊啊啊response_text_list进行flatten的维度为：",response_text_list.shape)
+            # print("啊啊啊啊response_text_list进行flatten之后的内容为：",response_text_list)
             non_tensor_batch["response_text_list"] = response_text_list
             # breakpoint()       
             # completions: List[RequestOutput] = self.inference_engine.generate(

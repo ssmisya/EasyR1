@@ -5,7 +5,8 @@
 # 检查是否在tmux会话内运行
 if [ -z "$TMUX" ]; then
   # 创建一个新的tmux会话并执行此脚本
-  SESSION_NAME="tool_grpo_spot_$(date +%Y%m%d_%H%M%S)"
+  ###
+  SESSION_NAME="ray_spot_test2_$(date +%Y%m%d_%H%M%S)"
   echo "创建新的tmux会话: $SESSION_NAME"
   tmux new-session -d -s "$SESSION_NAME" "bash $0 inside_tmux"
   echo "tmux会话已在后台启动，你可以通过以下命令查看:"
@@ -19,8 +20,6 @@ if [ "$1" != "inside_tmux" ]; then
   exit 1
 fi
 
-
-
 source ~/.bashrc
 source ~/miniconda3/bin/activate visual
 
@@ -29,6 +28,10 @@ export https_proxy="http://sunhaoyu:Td2EgE1Vb5lBofIRcv6aiAHtwN2BvPFJlhTrYUdIvMWD
 export HTTP_PROXY="http://sunhaoyu:Td2EgE1Vb5lBofIRcv6aiAHtwN2BvPFJlhTrYUdIvMWDeZ7rPq5jkRa4i2Qw@10.1.20.50:23128/"
 export HTTPS_PROXY="http://sunhaoyu:Td2EgE1Vb5lBofIRcv6aiAHtwN2BvPFJlhTrYUdIvMWDeZ7rPq5jkRa4i2Qw@10.1.20.50:23128/"
 export ALL_PROXY="http://sunhaoyu:Td2EgE1Vb5lBofIRcv6aiAHtwN2BvPFJlhTrYUdIvMWDeZ7rPq5jkRa4i2Qw@10.1.20.50:23128/"
+
+###
+export NO_PROXY="localhost,127.0.0.1,10.140.37.46,10.140.0.0/16,10.1.0.0/16"
+export no_proxy="localhost,127.0.0.1,10.140.37.46,10.140.0.0/16,10.1.0.0/16"
 
 export CUDA_HOME=/mnt/petrelfs/share/cuda-11.8
 export PATH=/mnt/petrelfs/share/cuda-11.8/bin:$PATH
@@ -47,34 +50,43 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_ENDPOINT=https://hf-mirror.com
 unset HF_ENDPOINT
 
-code_base=/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples
-cd $code_base
+code_base=/mnt/petrelfs/sunhaoyu/visual-code/EasyR1
+# 将工作目录切换到 Ray Job 提交的上下文目录，通常是你的项目根目录或包含你主脚本的目录
+# 这里设置为 code_base 的父目录，因为你的训练脚本 `main.py` 在 `EasyR1/examples` 下
+# Ray Job 提交时，working-dir 应该指向 Ray 可以在其中找到你的代码的目录
+project_root=/mnt/petrelfs/sunhaoyu/visual-code/EasyR1
+cd $project_root
 
 # 生成带时间戳的日志文件名
 log_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs"
 mkdir -p $log_dir
-log_file="${log_dir}/tool_grpo_spot_$(date +%Y%m%d_%H%M%S).log"
+###
+log_file="${log_dir}/ray_spot_test2_$(date +%Y%m%d_%H%M%S).log"
 
 
-# config_file=$1
 export NCCL_DEBUG=ERROR
 export NCCL_DEBUG_SUBSYS=ALL
 
-# export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 export PYTHONUNBUFFERED=1
 
 unset RAY_ADDRESS # 确保先清除，避免旧值干扰
 unset RAY_REDIS_ADDRESS
-# 确保你的 Ray 集群已在 10.140.37.26:6312 运行，Dashboard 在 10.140.37.26:8212
-export RAY_ADDRESS="http://10.140.37.26:8212" # Ray Job CLI 和一些客户端会用此连接
+# 确保你的 Ray 集群已在 10.140.37.132:6312 运行，Dashboard 在 10.140.37.132:8212
+# Ray Job CLI 连接的是 Dashboard 地址
+###
+export RAY_ADDRESS="http://10.140.37.46:8212"
 
-
+###
 quotatype="spot"
-config_file="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/configs/tool_spot.yaml"
-MODEL_PATH=/mnt/petrelfs/sunhaoyu/visual-code/llm_weights/Qwen2.5-VL-3B-Instruct
-checkpoint_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/checkpoints_spot/easy_r1/qwen2_5_3b_tool_grpo"
+config_file="examples/configs/ray_spot_test2.yaml"
+# MODEL_PATH=/mnt/petrelfs/sunhaoyu/visual-code/llm_weights/Qwen2.5-VL-3B-Instruct
+# 7B改成100试一下
+###
+MODEL_PATH=/mnt/petrelfs/share_data/songmingyang/runs/tool_factory/sft/v1/Qwen2.5-VL-7B-Instruct-ToolSFTv1/checkpoint-245
+###
+checkpoint_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/checkpoints/checkpoints_ray_test2"
 
 # 函数：查找最新的检查点
 find_latest_checkpoint() {
@@ -87,35 +99,37 @@ find_latest_checkpoint() {
   echo "$latest_checkpoint"
 }
 
-# 尝试停止任何现有Ray集群
-ray stop || true
+# 尝试停止任何现有Ray集群 (这个通常用于开发或测试，在提交Job前不需要)
+# ray stop || true
+
 
 # 查找最新的检查点
 latest_checkpoint=$(find_latest_checkpoint)
 
-gpus=0
-cpus=2
-node_list="SH-IDC1-10-140-37-26"
-export CUDA_VISIBLE_DEVICES=2,3,4,5
-
-# 构建命令
-cmd="OMP_NUM_THREADS=8 srun --partition=ai_moe -w ${node_list} --job-name=\"tool_grpo_spot\" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype} \
-python \
--m verl.trainer.main config=${config_file} worker.actor.model.model_path=${MODEL_PATH} ray_address=\"10.140.37.26:6312\""
+# 定义 Ray Job 要执行的 Python 命令
+# 注意：这里不再需要 srun，Ray 会自己调度资源
+###
+python_command="python -m verl.trainer.main config=${config_file} worker.actor.model.model_path=${MODEL_PATH} ray_address=\"10.140.37.46:6312\""
 
 # 如果存在最新检查点，则添加加载检查点的参数
 if [ -n "$latest_checkpoint" ]; then
   echo "从检查点恢复训练: $latest_checkpoint"
-  cmd="${cmd} trainer.load_checkpoint_path=${latest_checkpoint}"
+  python_command="${python_command} trainer.load_checkpoint_path=${latest_checkpoint}"
 else
   echo "从头开始训练"
 fi
 
-# 执行命令并记录日志
-echo "开始训练" | tee -a ${log_file}
-echo "$cmd" | tee -a ${log_file}
-eval "$cmd" 2>&1 | tee -a ${log_file}
+echo "开始通过 Ray Job 提交训练" | tee -a ${log_file}
+echo "Ray Job Command: ray job submit --address=\"$RAY_ADDRESS\" --working-dir=\"$project_root\" -- python_command..." | tee -a ${log_file}
+
+# 使用 ray job submit 提交任务
+# --working-dir 指定了 Ray Job 的工作目录，Ray 会将此目录的内容同步到集群节点
+# runtime-env要设置，为了防止把不需要的文件放进去
+### 底下的ray_address 需要修改
+ray job submit --address="$RAY_ADDRESS" \
+  --working-dir . \
+  --runtime-env ray_exclude.yaml \
+  -- bash -c "${python_command}" \
+  2>&1 | tee -a ${log_file}
 
 echo "运行日志已保存到: ${log_file}"
-
-

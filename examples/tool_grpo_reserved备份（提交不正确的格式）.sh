@@ -5,7 +5,7 @@
 # 检查是否在tmux会话内运行
 if [ -z "$TMUX" ]; then
   # 创建一个新的tmux会话并执行此脚本
-  SESSION_NAME="tool_grpo_spot_$(date +%Y%m%d_%H%M%S)"
+  SESSION_NAME="tool_grpo_resered_$(date +%Y%m%d_%H%M%S)"
   echo "创建新的tmux会话: $SESSION_NAME"
   tmux new-session -d -s "$SESSION_NAME" "bash $0 inside_tmux"
   echo "tmux会话已在后台启动，你可以通过以下命令查看:"
@@ -53,7 +53,7 @@ cd $code_base
 # 生成带时间戳的日志文件名
 log_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs"
 mkdir -p $log_dir
-log_file="${log_dir}/tool_grpo_spot_$(date +%Y%m%d_%H%M%S).log"
+log_file="${log_dir}/tool_grpo_reserved_$(date +%Y%m%d_%H%M%S).log"
 
 
 # config_file=$1
@@ -67,14 +67,14 @@ export PYTHONUNBUFFERED=1
 
 unset RAY_ADDRESS # 确保先清除，避免旧值干扰
 unset RAY_REDIS_ADDRESS
-# 确保你的 Ray 集群已在 10.140.37.26:6312 运行，Dashboard 在 10.140.37.26:8212
-export RAY_ADDRESS="http://10.140.37.26:8212" # Ray Job CLI 和一些客户端会用此连接
+# 确保你的 Ray 集群已在 10.140.37.138:6312 运行，Dashboard 在 10.140.37.138:8212
+export RAY_ADDRESS="http://10.140.37.138:8212" # Ray Job CLI 和一些客户端会用此连接
 
 
-quotatype="spot"
-config_file="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/configs/tool_spot.yaml"
+quotatype="reserved"
+config_file="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/configs/tool_reserved.yaml"
 MODEL_PATH=/mnt/petrelfs/sunhaoyu/visual-code/llm_weights/Qwen2.5-VL-3B-Instruct
-checkpoint_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/checkpoints_spot/easy_r1/qwen2_5_3b_tool_grpo"
+checkpoint_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/checkpoints_reserved/easy_r1/qwen2_5_3b_tool_grpo"
 
 # 函数：查找最新的检查点
 find_latest_checkpoint() {
@@ -90,18 +90,21 @@ find_latest_checkpoint() {
 # 尝试停止任何现有Ray集群
 ray stop || true
 
+
 # 查找最新的检查点
 latest_checkpoint=$(find_latest_checkpoint)
 
+
+
 gpus=0
 cpus=2
-node_list="SH-IDC1-10-140-37-26"
+node_list="SH-IDC1-10-140-37-138"
 export CUDA_VISIBLE_DEVICES=2,3,4,5
 
 # 构建命令
-cmd="OMP_NUM_THREADS=8 srun --partition=ai_moe -w ${node_list} --job-name=\"tool_grpo_spot\" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype} \
+cmd="OMP_NUM_THREADS=8 srun --partition=ai_moe -w ${node_list} --job-name=\"tool_grpo_reserved\" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype} \
 python \
--m verl.trainer.main config=${config_file} worker.actor.model.model_path=${MODEL_PATH} ray_address=\"10.140.37.26:6312\""
+-m verl.trainer.main config=${config_file} worker.actor.model.model_path=${MODEL_PATH} ray_address=\"10.140.37.138:6312\""
 
 # 如果存在最新检查点，则添加加载检查点的参数
 if [ -n "$latest_checkpoint" ]; then

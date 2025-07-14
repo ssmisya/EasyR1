@@ -1,7 +1,6 @@
 import re
 import json
 import torch
-import signal
 import time
 import fcntl
 import os
@@ -53,16 +52,6 @@ class ToolCallStats:
             self.tool_calls[tool_name] += 1
             if success:
                 self.tool_success[tool_name] += 1
-            
-    # def get_success_rate(self):
-    #     if self.total_calls == 0:
-    #         return 0.0
-    #     return self.successful_calls / self.total_calls
-    
-    # def get_tool_success_rate(self, tool_name):
-    #     if tool_name not in self.tool_calls or self.tool_calls[tool_name] == 0:
-    #         return 0.0
-    #     return self.tool_success[tool_name] / self.tool_calls[tool_name]
     
     def get_stats_dict(self):
         stats = {
@@ -85,20 +74,23 @@ class ToolCallStats:
         self.tool_calls = {}
         self.tool_success = {}
 
-# 定义超时异常类
-class TimeoutException(Exception): pass
-
-# 定义超时处理函数
-def _timeout_handler(signum, frame):
-    raise TimeoutException("chat() timed out.")
-signal.signal(signal.SIGALRM, _timeout_handler)
-
 _lock_lock = threading.Lock()
 _file_locks = {}
 
 def _get_file_lock(filepath):
     """Get a lock for a specific file path."""
+    global _file_locks
     with _lock_lock:
+        # 清理不存在的文件路径的锁
+        locks_to_remove = []
+        for path in _file_locks:
+            if not os.path.exists(os.path.dirname(path)):
+                locks_to_remove.append(path)
+        
+        for path in locks_to_remove:
+            del _file_locks[path]
+            
+        # 获取或创建锁
         if filepath not in _file_locks:
             _file_locks[filepath] = threading.Lock()
         return _file_locks[filepath]
@@ -122,21 +114,23 @@ def pil_to_base64(img: Image.Image, url_format = False) -> str:
     Returns:
         str: Base64 encoded string representation of the image.
     """
-    buffered = BytesIO()
-    # 确保图像是RGB模式，如果是RGBA或其他模式则转换
-    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-        # 需要先转换为RGB模式
-        background = Image.new('RGB', img.size, (255, 255, 255))
-        background.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)  # 使用alpha通道作为mask
-        img = background
-    elif img.mode != 'RGB':
-        img = img.convert('RGB')
-    
-    img.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
-    if url_format:
-        img_str = f"data:image/jpeg;base64,{img_str}"
-    return img_str
+    with BytesIO() as buffered:
+        # 确保图像是RGB模式，如果是RGBA或其他模式则转换
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            # 需要先转换为RGB模式
+            with Image.new('RGB', img.size, (255, 255, 255)) as background:
+                background.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)  # 使用alpha通道作为mask
+                background.save(buffered, format="JPEG")
+        elif img.mode != 'RGB':
+            with img.convert('RGB') as converted_img:
+                converted_img.save(buffered, format="JPEG")
+        else:
+            img.save(buffered, format="JPEG")
+        
+        img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        if url_format:
+            img_str = f"data:image/jpeg;base64,{img_str}"
+        return img_str
 
 def load_image_from_base64(image):
     return Image.open(BytesIO(base64.b64decode(image)))
@@ -173,6 +167,7 @@ class VllmToolInferencer(object):
         model_mode: str = "general",
         max_rounds: int = 5,
         stop_token: str = "<stop>",
+        conversation_log_name: str = None,  # 添加conversation_log_name参数
     ):
         """
         初始化VLLM工具推理器
@@ -186,6 +181,7 @@ class VllmToolInferencer(object):
             model_mode: 模型模式，支持general和llava_plus
             max_rounds: 最大对话轮数
             stop_token: 停止标记
+            conversation_log_name: 实验名称，用于日志文件命名
         """
         # 初始化VLLM模型
         # 如果有了vllm_model，则直接使用vllm_model，不需要model_name和model_configs
@@ -210,12 +206,17 @@ class VllmToolInferencer(object):
         self.model_mode = model_mode
         self.max_rounds = max_rounds
         self.stop_token = stop_token
+        self.conversation_log_name = conversation_log_name  # 存储实验名称
         
         # 添加图像字典，用于存储每个对话项的图像
         self.image_history = {}
         
         # 添加工具调用统计
         self.tool_stats = ToolCallStats()
+        
+        # 添加清理计数器，用于定期触发资源清理
+        self.cleanup_counter = 0
+        self.cleanup_interval = 100  # 每处理100个对话项后进行一次清理
     
     def append_conversation_fn(
         self,
@@ -326,7 +327,7 @@ class VllmToolInferencer(object):
                     except Exception as e:
                         edited_image = None
                 
-
+                # print(f"tool_result是！！！！！！！！！！！！！: {tool_result}")
                 # 将tool_result中的"tool_reward"删除
                 tool_result.pop("tool_reward", None)
                 
@@ -393,55 +394,6 @@ class VllmToolInferencer(object):
         conversations = item["conversations"]
         conversations_str = self.get_repr_of_conversation(conversations)
         append_jsonl(conversations_str, tool_log_file)
-
-    # def batch_inference(self, dataset):
-    #     """
-    #     批量推理函数，处理BaseEvalDataset数据集中的所有项目
-        
-    #     参数:
-    #         dataset: 要处理的BaseEvalDataset数据集
-    #     """
-    #     # 创建数据加载器，批大小为1，工作线程数为2，使用collate_fn确保每次返回单个数据项
-    #     dataloader = torch.utils.data.DataLoader(
-    #         dataset, 
-    #         batch_size=1, 
-    #         num_workers=2, 
-    #         collate_fn=lambda x: x[0]  # 确保每次返回一个数据项
-    #     )
-        
-    #     # 创建进度条
-    #     progress_bar = tqdm_rank0(len(dataloader), desc="Model Responding")
-        
-    #     # 处理数据集中的每个项目
-    #     for idx, item in enumerate(dataloader):
-    #         # 更新进度条
-    #         progress_bar.update(1)
-            
-    #         # 准备输入数据
-    #         input_data = {
-    #             "conversation": item.get("conversation", None),
-    #             "prompt": item.get("text", ""),
-    #             "images": [item.get("image")] if item.get("image") is not None else []
-    #         }
-            
-    #         if "system" in item:
-    #             input_data["system"] = item["system"]
-                
-    #         # 执行推理
-    #         results = self.inference(
-    #             inputs=[input_data],
-    #             max_rounds=self.max_rounds,
-    #             do_sample=False
-    #         )
-            
-    #         # 处理结果并存储到数据集中
-    #         # 所以不需要return
-    #         for result in results:
-    #             idx = item["idx"]
-    #             # 获取最后一个样本的结果
-    #             sample = result["samples"][0]
-    #             # 存储结果
-    #             dataset.store_results(dict(idx=idx, results=sample))
 
     def extract_tool_call(self, text: str):
         """
@@ -523,7 +475,7 @@ class VllmToolInferencer(object):
             api_params: 工具参数
             tool_retry_num: 重试次数
             tool_retry_interval: 重试间隔
-            tool_timeout_sec: 超时时间
+            tool_timeout_sec: 超时时间（已不再使用）
             
         返回:
             工具调用结果
@@ -533,22 +485,12 @@ class VllmToolInferencer(object):
         
         for attempt in range(tool_retry_num):
             try:
-                # 设置超时警报
-                signal.alarm(tool_timeout_sec)
-                # 请求工具获得回答结果
+                # 直接调用工具，不设置超时
                 tool_result = self.tool_manager.call_tool(api_name, api_params)
-                # 取消超时警报
-                signal.alarm(0)
                 break
-            except TimeoutException as te:
-                retry_info.append(f"第{attempt + 1}次尝试: 超时")
-                tool_result = {"text": f"Failed to call tool {api_name}: {te}", "error_code": 1}
             except Exception as e:
                 retry_info.append(f"第{attempt + 1}次尝试: 异常 - {str(e)}")
                 tool_result = {"text": f"Failed to call tool {api_name}: {e}", "error_code": 1}
-            finally:
-                # 确保取消超时警报
-                signal.alarm(0)
                 if attempt < tool_retry_num - 1:
                     time.sleep(tool_retry_interval)
         
@@ -624,30 +566,40 @@ class VllmToolInferencer(object):
         results = []
         
         # 使用线程池并行执行所有工具调用
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(16, len(tool_tasks))) as executor:
-            # 提交所有任务
-            future_to_task = {
-                executor.submit(
-                    self.call_tool_with_retry, 
-                    api_name, 
-                    api_params, 
-                    tool_retry_num, 
-                    tool_retry_interval, 
-                    tool_timeout_sec
-                ): (idx, cfg) 
-                for idx, cfg, api_name, api_params in tool_tasks
-            }
-            
-            # 收集所有结果
-            for future in concurrent.futures.as_completed(future_to_task):
-                idx, cfg = future_to_task[future]
-                try:
-                    tool_result = future.result()
-                    results.append((idx, cfg, tool_result))
-                except Exception as e:
-                    # 处理异常情况
-                    tool_result = {"text": f"Failed to call tool: {str(e)}", "error_code": 1}
-                    results.append((idx, cfg, tool_result))
+        tool_tasks_num = max(2, len(tool_tasks)) # 防止tool_tasks为空
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, tool_tasks_num)) as executor:
+            try:
+                # 提交所有任务
+                future_to_task = {
+                    executor.submit(
+                        self.call_tool_with_retry, 
+                        api_name, 
+                        api_params, 
+                        tool_retry_num, 
+                        tool_retry_interval, 
+                        tool_timeout_sec
+                    ): (idx, cfg) 
+                    for idx, cfg, api_name, api_params in tool_tasks
+                }
+                
+                # 收集所有结果
+                for future in concurrent.futures.as_completed(future_to_task):
+                    idx, cfg = future_to_task[future]
+                    try:
+                        tool_result = future.result()
+                        results.append((idx, cfg, tool_result))
+                    except Exception as e:
+                        # 处理异常情况
+                        tool_result = {"text": f"Failed to call tool: {str(e)}", "error_code": 1}
+                        results.append((idx, cfg, tool_result))
+            except Exception as e:
+                print(f"Error in thread pool execution: {e}")
+            finally:
+                # 确保所有任务都被取消
+                executor.shutdown(wait=False)
+                for future in future_to_task:
+                    if not future.done():
+                        future.cancel()
         
         return results
 
@@ -661,11 +613,12 @@ class VllmToolInferencer(object):
         sample_num: int = 1,
         vllm_retry_num: int = 3,
         vllm_retry_interval: int = 5,
-        vllm_timeout_sec: int = 500,
+        vllm_timeout_sec: int = 600000,  # 已不再使用
         tool_retry_num: int = 3,
         tool_retry_interval: int = 5,
-        tool_timeout_sec: int = 60,
+        tool_timeout_sec: int = 18600000,  # 已不再使用
         tool_log_file: str = None,
+        conversation_log_name: str = None,  # 添加conversation_log_name参数
     ) -> str:
         """
         执行模型推理和工具调用
@@ -678,17 +631,28 @@ class VllmToolInferencer(object):
             sample_num: 采样数量
             vllm_retry_num: VLLM重试次数
             vllm_retry_interval: VLLM重试间隔时间(秒)
-            vllm_timeout_sec: VLLM超时时间(秒)
+            vllm_timeout_sec: VLLM超时时间(秒)，已不再使用
             tool_retry_num: 工具调用重试次数
             tool_retry_interval: 工具调用重试间隔时间(秒)
-            tool_timeout_sec: 工具调用超时时间(秒)
+            tool_timeout_sec: 工具调用超时时间(秒)，已不再使用
             tool_log_file: 工具日志文件路径
+            conversation_log_name: 实验名称，用于日志文件命名
             
         返回:
             推理结果列表
         """
+        # 如果传入了conversation_log_name，则更新实例变量
+        if conversation_log_name:
+            self.conversation_log_name = conversation_log_name
+        
         # 重置工具调用统计
         self.tool_stats.reset()
+        
+        # 增加清理计数器，定期触发资源清理
+        self.cleanup_counter += 1
+        if self.cleanup_counter >= self.cleanup_interval:
+            self.cleanup_stale_resources()
+            self.cleanup_counter = 0
         
         # 设置采样参数
         if not do_sample:
@@ -709,12 +673,11 @@ class VllmToolInferencer(object):
         for k,v in kwargs.items():
             setattr(new_sampling_params, k, v)
         
-        # print(f"vllm_tool_inference.py的new_sampling_params: {new_sampling_params}")
-        # print("vllm_tool_inferencer.py传入的inputs的维度为：", len(inputs))
-            
-        
         # 构建输入数据
         input_data = []
+        # 跟踪创建的数据实例ID，用于确保清理
+        created_item_ids = []
+        
         for input_item_idx,item in enumerate(inputs):
             # 处理图像输入
             if "images" in item:
@@ -760,6 +723,7 @@ class VllmToolInferencer(object):
                     input_data.append(data_instance)
                     # 初始化该数据实例的图像历史
                     item_id = id(data_instance) # 这里item_id是data_instance的id，是data_instance的内存地址
+                    created_item_ids.append(item_id)
                     self.image_history[item_id] = {}
                     # 存储初始图像为img_1
                     if len(images) > 0:
@@ -783,6 +747,7 @@ class VllmToolInferencer(object):
                 input_data.append(data_instance)
                 # 初始化该数据实例的图像历史
                 item_id = id(data_instance)
+                created_item_ids.append(item_id)
                 self.image_history[item_id] = {}
                 # 存储初始图像为img_1
                 if len(images) > 0:
@@ -790,185 +755,182 @@ class VllmToolInferencer(object):
                     # 添加其他图像（如果有）
                     for idx, img in enumerate(images[1:], start=2):
                         self.image_history[item_id][f"img_{idx}"] = img
-        # print("do_sample之后的input_data的维度为：", len(input_data))
-        # print("构造好的image_history的长度为：", len(self.image_history))
-            
-        # 执行多轮对话
-        for round_num in range(max_rounds):
-            # 获取状态为"processing"的对话和索引
-            # 一次性获取所有状态为"processing"的对话
-            input_conversations = [item["conversations"] for item in input_data if item["status"] == "processing"]
-            # input_idxs值从0开始，到len(input_data) - 1
-            input_idxs = [idx for idx, item in enumerate(input_data) if item["status"] == "processing"]
-            
-            # 如果没有需要处理的对话，则退出循环
-            if len(input_conversations) == 0:
-                break
-            
-            # 模型推理，带重试机制
-            outputs = None
-            retry_info = []
-            
-            for attempt in range(vllm_retry_num):
-                try:
-                    # 设置超时警报
-                    signal.alarm(vllm_timeout_sec)
-                    # 获得所有状态为"processing"的对话的输出，批量生成的
-                    outputs = self.vllm_model.chat(
-                        input_conversations, sampling_params=new_sampling_params, use_tqdm = True,
-                    )
-                    # 取消超时警报
-                    signal.alarm(0)
+        
+        try:
+            # 执行多轮对话
+            for round_num in range(max_rounds):
+                # 获取状态为"processing"的对话和索引
+                # 一次性获取所有状态为"processing"的对话
+                input_conversations = [item["conversations"] for item in input_data if item["status"] == "processing"]
+                # input_idxs值从0开始，到len(input_data) - 1
+                input_idxs = [idx for idx, item in enumerate(input_data) if item["status"] == "processing"]
+                
+                # 如果没有需要处理的对话，则退出循环
+                if len(input_conversations) == 0:
                     break
-                except TimeoutException as te:
-                    retry_info.append(f"第{attempt + 1}次尝试: 超时")
-                except Exception as e:
-                    retry_info.append(f"第{attempt + 1}次尝试: 异常 - {str(e)}")
-                finally:
-                    # 确保取消超时警报
-                    signal.alarm(0)
-                    if attempt < vllm_retry_num - 1:
-                        time.sleep(vllm_retry_interval)
-            
-            # 如果有重试信息，打印出来
-            if retry_info:
-                print("\n========== VLLM模型推理重试 ==========")
-                for info in retry_info:
-                    print(info)
-                print("================================\n")
                 
-            # 处理模型输出
-            if outputs is None:
-                # 如果模型生成失败，使用错误消息
-                output_texts = ["Model generation error"] * len(input_conversations)
-                output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
-            else:
-                output_texts = [output.outputs[0].text for output in outputs]
-                output_idss = [output.outputs[0].token_ids for output in outputs]
-
-            # 首先处理所有模型输出，提取工具调用信息
-            tool_cfgs_list = []
-            for input_idx, output_text, output_ids in zip(input_idxs, output_texts, output_idss):
-                # 记录模型输出
-                input_data[input_idx]["model_outputs"].append(output_text)
-                input_data[input_idx]["model_output_ids"].append(output_ids)
-                # 将模型回复添加到对话中
-                input_data[input_idx]["conversations"] = self.append_conversation_fn(conversation=input_data[input_idx]["conversations"], text=output_text, role="assistant")
+                # 模型推理，带重试机制
+                outputs = None
+                retry_info = []
                 
-                # 如果回复中包含"<response>"，则标记为已完成并继续处理下一个
-                if "<response>" in output_text:
-                    input_data[input_idx]["status"] = "finished"
-                    input_data[input_idx]["tool_rewards"].append(0.0)
-                    # 立即清理该对话的图像历史
-                    item_id = id(input_data[input_idx])
-                    if item_id in self.image_history:
-                        del self.image_history[item_id]
-                    tool_cfgs_list.append(None)
-                    continue
-
-                # 提取工具调用信息
-                tool_calls = self.extract_tool_call(output_text)
-                if tool_calls is not None and len(tool_calls) > 0:
-                    # 只使用第一个工具调用
-                    tool_call = tool_calls[0]
-                    tool_name = tool_call['name']
-                    tool_params = tool_call['parameters']
+                for attempt in range(vllm_retry_num):
+                    try:
+                        # 直接调用模型，不设置超时
+                        outputs = self.vllm_model.chat(
+                            input_conversations, sampling_params=new_sampling_params, use_tqdm = True,
+                        )
+                        break
+                    except Exception as e:
+                        retry_info.append(f"第{attempt + 1}次尝试: 异常 - {str(e)}")
+                        if attempt < vllm_retry_num - 1:
+                            time.sleep(vllm_retry_interval)
+                
+                # 如果有重试信息，打印出来
+                if retry_info:
+                    print("\n========== VLLM模型推理重试 ==========")
+                    for info in retry_info:
+                        print(info)
+                    print("================================\n")
                     
-                    # 构建工具配置格式
-                    tool_cfg = [{
-                        "API_name": tool_name,
-                        "API_params": tool_params
-                    }]
-                    tool_cfgs_list.append(tool_cfg)
+                # 处理模型输出
+                if outputs is None:
+                    # 如果模型生成失败，使用错误消息
+                    output_texts = ["Model generation error"] * len(input_conversations)
+                    output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
                 else:
-                    tool_cfg = None
-                    tool_cfgs_list.append(None)
-                    # 如果模型输出中没有工具调用，则将工具调用奖励设置为0
-                    input_data[input_idx]["tool_rewards"].append(0.0)
+                    output_texts = [output.outputs[0].text for output in outputs]
+                    output_idss = [output.outputs[0].token_ids for output in outputs]
+
+                # 首先处理所有模型输出，提取工具调用信息
+                tool_cfgs_list = []
+                for input_idx, output_text, output_ids in zip(input_idxs, output_texts, output_idss):
+                    # 记录模型输出
+                    input_data[input_idx]["model_outputs"].append(output_text)
+                    input_data[input_idx]["model_output_ids"].append(output_ids)
+                    # 将模型回复添加到对话中
+                    input_data[input_idx]["conversations"] = self.append_conversation_fn(conversation=input_data[input_idx]["conversations"], text=output_text, role="assistant")
                     
-                    # 如果没有工具配置，则将原始提示添加到对话中
-                    input_data[input_idx]["conversations"] = self.append_conversation_fn(
-                        conversation=input_data[input_idx]["conversations"], 
-                        text=input_data[input_idx]["prompt"], 
-                        role="user"
-                    )
-            
-            # 并行处理所有工具调用
-            tool_results = self.process_tool_calls(
-                input_data=input_data,
-                input_idxs=input_idxs,
-                tool_cfgs=tool_cfgs_list,
-                tool_retry_num=tool_retry_num,
-                tool_retry_interval=tool_retry_interval,
-                tool_timeout_sec=tool_timeout_sec
-            )
-            
-            # 处理工具调用结果
-            for idx, tool_cfg, tool_result in tool_results:
-                # 记录工具配置和输出
-                input_data[idx]["tool_cfgs"].append(tool_cfg)
-                input_data[idx]["tool_outputs"].append(tool_result)
+                    # 如果回复中包含"<response>"，则标记为已完成并继续处理下一个
+                    if "<response>" in output_text:
+                        input_data[input_idx]["status"] = "finished"
+                        input_data[input_idx]["tool_rewards"].append(0.0)
+                        # 立即清理该对话的图像历史
+                        item_id = id(input_data[input_idx])
+                        if item_id in self.image_history:
+                            del self.image_history[item_id]
+                        tool_cfgs_list.append(None)
+                        continue
+
+                    # 提取工具调用信息
+                    tool_calls = self.extract_tool_call(output_text)
+                    if tool_calls is not None and len(tool_calls) > 0:
+                        # 只使用第一个工具调用
+                        tool_call = tool_calls[0]
+                        tool_name = tool_call['name']
+                        tool_params = tool_call['parameters']
+                        
+                        # 构建工具配置格式
+                        tool_cfg = [{
+                            "API_name": tool_name,
+                            "API_params": tool_params
+                        }]
+                        tool_cfgs_list.append(tool_cfg)
+                    else:
+                        tool_cfg = None
+                        tool_cfgs_list.append(None)
+                        # 如果模型输出中没有工具调用，则将工具调用奖励设置为0
+                        input_data[input_idx]["tool_rewards"].append(0.0)
+                        
+                        # 如果没有工具配置，则将原始提示添加到对话中
+                        input_data[input_idx]["conversations"] = self.append_conversation_fn(
+                            conversation=input_data[input_idx]["conversations"], 
+                            text=input_data[input_idx]["prompt"], 
+                            role="user"
+                        )
                 
-                # 获取API名称
-                api_name = tool_cfg[0].get("API_name", "未知工具")
-                
-                # 获取调用状态
-                status = tool_result.get("status", "")
-                error_code = tool_result.get("error_code", -1)
-                # 将tool_reward添加到工具调用奖励列表中
-                if tool_result.get("tool_reward") is not None:
-                    input_data[idx]["tool_rewards"].append(tool_result.get("tool_reward"))
-                call_status = "success" if (status == "success" or error_code == 0) else "failed"
-                
-                # 更新工具调用统计
-                self.tool_stats.add_call(call_status == "success", api_name)
-                
-                # 处理工具结果并更新对话
-                updated_conversations = self.handle_tool_result(
-                    cfg=tool_cfg[0],
-                    tool_result=tool_result,
-                    conversations=input_data[idx]["conversations"],
-                    model_mode="general",
-                    original_prompt=input_data[idx]["prompt"],
-                    input_data_item=input_data[idx]
+                # 并行处理所有工具调用
+                tool_results = self.process_tool_calls(
+                    input_data=input_data,
+                    input_idxs=input_idxs,
+                    tool_cfgs=tool_cfgs_list,
+                    tool_retry_num=tool_retry_num,
+                    tool_retry_interval=tool_retry_interval,
+                    tool_timeout_sec=tool_timeout_sec
                 )
                 
-                # 更新对话
-                input_data[idx]["conversations"] = updated_conversations
+                # 处理工具调用结果
+                for idx, tool_cfg, tool_result in tool_results:
+                    # 记录工具配置和输出
+                    input_data[idx]["tool_cfgs"].append(tool_cfg)
+                    input_data[idx]["tool_outputs"].append(tool_result)
+                    
+                    # 获取API名称
+                    api_name = tool_cfg[0].get("API_name", "未知工具")
+                    
+                    # 获取调用状态
+                    status = tool_result.get("status", "")
+                    error_code = tool_result.get("error_code", -1)
+                    # 将tool_reward添加到工具调用奖励列表中
+                    if tool_result.get("tool_reward") is not None:
+                        input_data[idx]["tool_rewards"].append(tool_result.get("tool_reward"))
+                    call_status = "success" if (status == "success" or error_code == 0) else "failed"
+                    
+                    # 更新工具调用统计
+                    self.tool_stats.add_call(call_status == "success", api_name)
+                    
+                    # 处理工具结果并更新对话
+                    updated_conversations = self.handle_tool_result(
+                        cfg=tool_cfg[0],
+                        tool_result=tool_result,
+                        conversations=input_data[idx]["conversations"],
+                        model_mode="general",
+                        original_prompt=input_data[idx]["prompt"],
+                        input_data_item=input_data[idx]
+                    )
+                    
+                    # 更新对话
+                    input_data[idx]["conversations"] = updated_conversations
+                    
+            # 记录工具输出到日志文件
+            if tool_log_file is not None:
+                for item in input_data:
+                    self.log_item_into_file(item, tool_log_file)
                 
-        # 记录工具输出到日志文件
-        if tool_log_file is not None:
+            # 收集最终结果
+            results = []
+            # 按输入项索引分组结果
+            grouped_results = {}
             for item in input_data:
-                self.log_item_into_file(item, tool_log_file)
-                
-        # 收集最终结果
-        results = []
-        # 按输入项索引分组结果
-        grouped_results = {}
-        for item in input_data:
-            input_item_idx = item["input_item_idx"]
-            if grouped_results.get(input_item_idx) is None:
-                grouped_results[input_item_idx] = []
-            grouped_results[input_item_idx].append(item)
-            # 保存对话到日志文件
-            log_file = self.save_conversation_to_log(item["conversations"])
-            print(f"对话已完成并保存到: {log_file}")
+                input_item_idx = item["input_item_idx"]
+                if grouped_results.get(input_item_idx) is None:
+                    grouped_results[input_item_idx] = []
+                grouped_results[input_item_idx].append(item)
+                # 保存对话到日志文件
+                log_file = self.save_conversation_to_log(item["conversations"])
+                # print(f"对话已完成并保存到: {log_file}")
 
-            # 只清理未完成的对话的图像历史（已完成的在前面已经清理）
-            item_id = id(item)
-            if item_id in self.image_history:
-                del self.image_history[item_id]
-        
-        # 将分组结果转换为最终输出格式
-        for k,v in grouped_results.items():
-            results.append({
-                "item_idx": k, 
-                "samples": v,
-                "tool_stats": self.tool_stats.get_stats_dict()  # 添加工具调用统计
-            })
-        # print("vllm_tool_inferencer.py的results的维度为：", len(results))
-        # print("vllm_tool_inferencer.py运行结束后的self.tool_stats.get_stats_dict()：", self.tool_stats.get_stats_dict())
-        return results
+                # 只清理未完成的对话的图像历史（已完成的在前面已经清理）
+                item_id = id(item)
+                if item_id in self.image_history:
+                    del self.image_history[item_id]
+            
+            # 将分组结果转换为最终输出格式
+            for k,v in grouped_results.items():
+                results.append({
+                    "item_idx": k, 
+                    "samples": v,
+                    "tool_stats": self.tool_stats.get_stats_dict()  # 添加工具调用统计
+                })
+            
+            return results
+        finally:
+            # 确保无论如何都清理所有创建的图像历史
+            for item_id in created_item_ids:
+                if item_id in self.image_history:
+                    del self.image_history[item_id]
+            
+            # 触发一次资源清理
+            self.cleanup_stale_resources()
 
     def save_conversation_to_log(self, conversation, log_dir="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs"):
         """
@@ -982,17 +944,20 @@ class VllmToolInferencer(object):
         # 确保日志目录存在
         os.makedirs(log_dir, exist_ok=True)
         
-        # 使用固定的日志文件名，按日期分类
-        # today = datetime.datetime.now().strftime("%Y%m%d")
-        # log_file = os.path.join(log_dir, f"conversations_{today}.jsonl")
-        # log_file = os.path.join(log_dir, f"conversations_spot.jsonl")
-        log_file = os.path.join(log_dir, f"conversations_reserved.jsonl")
+        # 使用实验名称作为日志文件名的一部分
+        if self.conversation_log_name:
+            log_file = os.path.join(log_dir, f"conversations_{self.conversation_log_name}.jsonl")
+        else:
+            # 如果没有实验名称，则使用默认名称
+            log_file = os.path.join(log_dir, f"conversations.jsonl")
         
         # 处理对话内容，替换图像为占位符
         processed_conversation = []
         image_counter = 1
         
         for message in conversation:
+            if message["role"] == "system":
+                continue
             processed_message = {"role": message["role"]}
             
             if isinstance(message["content"], list):
@@ -1029,4 +994,40 @@ class VllmToolInferencer(object):
                 f.write(json.dumps(conversation_entry, ensure_ascii=False) + '\n')
         
         return log_file
+
+    def cleanup_stale_resources(self):
+        """
+        清理过期的资源，防止内存泄漏
+        """
+        # 清理已经不再使用的图像历史
+        stale_ids = []
+        for item_id in self.image_history:
+            # 检查这个ID是否仍然有效（对象是否存在）
+            # 由于Python的垃圾回收机制，如果对象已被回收，尝试获取弱引用会失败
+            try:
+                # 尝试获取弱引用指向的对象
+                import ctypes
+                ctypes.cast(item_id, ctypes.py_object)
+            except (ValueError, TypeError, OverflowError):
+                # 如果获取失败，说明对象已被回收
+                stale_ids.append(item_id)
+        
+        # 删除过期的图像历史
+        for item_id in stale_ids:
+            if item_id in self.image_history:
+                del self.image_history[item_id]
+        
+        # 清理_file_locks中不再需要的锁
+        global _file_locks
+        with _lock_lock:
+            # 只保留当前正在使用的锁
+            active_locks = set()
+            stale_locks = []
+            for filepath in _file_locks:
+                if not os.path.exists(os.path.dirname(filepath)):
+                    stale_locks.append(filepath)
+            
+            # 删除过期的锁
+            for filepath in stale_locks:
+                del _file_locks[filepath]
 

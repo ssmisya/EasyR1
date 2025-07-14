@@ -177,3 +177,4 @@ wandb/
 /examples/wandb
 scripts/*
 !scripts/model_merger.py
+scripts/logs

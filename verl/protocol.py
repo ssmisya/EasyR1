@@ -176,6 +176,7 @@ class DataProto:
     meta_info: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        # 7b模型这里出错
         self.check_consistency()  # perform necessary checking
 
     def __len__(self) -> int:
