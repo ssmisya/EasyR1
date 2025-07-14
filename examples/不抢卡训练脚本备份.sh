@@ -2,22 +2,22 @@
 
 # set -x # 打印所有运行的命令
 
-# # 检查是否在tmux会话内运行
-# if [ -z "$TMUX" ]; then
-#   # 创建一个新的tmux会话并执行此脚本
-#   SESSION_NAME="tool_grpo_$(date +%Y%m%d_%H%M%S)"
-#   echo "创建新的tmux会话: $SESSION_NAME"
-#   tmux new-session -d -s "$SESSION_NAME" "bash $0 inside_tmux"
-#   echo "tmux会话已在后台启动，你可以通过以下命令查看:"
-#   echo "tmux attach -t $SESSION_NAME"
-#   exit 0
-# fi
+# 检查是否在tmux会话内运行
+if [ -z "$TMUX" ]; then
+  # 创建一个新的tmux会话并执行此脚本
+  SESSION_NAME="tool_grpo_$(date +%Y%m%d_%H%M%S)"
+  echo "创建新的tmux会话: $SESSION_NAME"
+  tmux new-session -d -s "$SESSION_NAME" "bash $0 inside_tmux"
+  echo "tmux会话已在后台启动，你可以通过以下命令查看:"
+  echo "tmux attach -t $SESSION_NAME"
+  exit 0
+fi
 
-# # 如果参数不是inside_tmux，说明是tmux内部调用，正常执行脚本
-# if [ "$1" != "inside_tmux" ]; then
-#   echo "请通过不带参数的方式运行此脚本，以启动tmux会话"
-#   exit 1
-# fi
+# 如果参数不是inside_tmux，说明是tmux内部调用，正常执行脚本
+if [ "$1" != "inside_tmux" ]; then
+  echo "请通过不带参数的方式运行此脚本，以启动tmux会话"
+  exit 1
+fi
 
 source ~/.bashrc
 source ~/miniconda3/bin/activate visual
@@ -88,14 +88,19 @@ EOF
 # 设置Ray配置文件路径
 export RAY_CONFIG_DIR=/tmp
 
-gpus=0
-cpus=2
+gpus=4
+cpus=64
 quotatype="spot"
-# quotatype="reserved"
-config_file="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/configs/tool.yaml"
+config_file="/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/configs/tool_spot.yaml"
 MODEL_PATH=/mnt/petrelfs/sunhaoyu/visual-code/llm_weights/Qwen2.5-VL-3B-Instruct  # replace it with your local file path
-OMP_NUM_THREADS=8 srun --partition=ai_moe --job-name="tool_grpo" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype}  \
+# 申请指定节点
+OMP_NUM_THREADS=8 srun --partition=ai_moe --nodelist=SH-IDC1-10-140-37-156 --job-name="tool_grpo" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype} \
 python \
--m test
+-m verl.trainer.main config=${config_file} worker.actor.model.model_path=${MODEL_PATH} ray_address="local" 2>&1 | tee ${log_file}
 
+# OMP_NUM_THREADS=8 srun --partition=ai_moe --job-name="tool_grpo" --mpi=pmi2 --export=ALL --no-kill --gres=gpu:${gpus} -n1 --ntasks-per-node=1 -c ${cpus} --kill-on-bad-exit=1 --quotatype=${quotatype}  \
+# python \
+# -m verl.trainer.main config=${config_file}  worker.actor.model.model_path=${MODEL_PATH} ray_address="local" 2>&1 | tee ${log_file}
+
+echo "运行日志已保存到: ${log_file}"
 

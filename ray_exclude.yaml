@@ -1,0 +1,10 @@
+# /mnt/petrelfs/sunhaoyu/visual-code/EasyR1/runtime_env.yaml
+excludes:
+  - examples/checkpoints_ray_test
+  - examples/checkpoints_ray_test1
+  - examples/checkpoints_ray_test2
+  - examples/checkpoints_direct_refine
+  - examples/checkpoints_direct_refine40
+  - examples/checkpoints_sft_refine
+  - checkpoints
+  - scripts/logs

@@ -34,6 +34,7 @@ def compute_score(predicts: List[str], ground_truths: List[str], tool_rewards: L
         if format_reward_value == 1.0:
             try:
                 # grade_answer的输出事True或者False，可以当1或者0使用
+                # answr来自于format_reward的返回
                 acc_reward_value = grade_answer(answer, ground_truth)
                 tool_reward = tool_rewards[i]
                 if isinstance(tool_reward, list):
@@ -55,6 +56,7 @@ def compute_score(predicts: List[str], ground_truths: List[str], tool_rewards: L
             # reward_value = (1 - format_weight) * acc_reward_value + format_weight * 
             # 分数范围为0-6分
             reward_value = format_reward_value + acc_reward_value + tool_reward_value
+        # print(f"当模型回答为{predict}时,传进来的tool_reward_value为{tool_rewards[i]}, overall_reward_value为{reward_value}, format_reward_value为{format_reward_value}, acc_reward_value为{acc_reward_value}")
         scores.append(
             {
                 "overall": reward_value,
@@ -68,7 +70,6 @@ def compute_score(predicts: List[str], ground_truths: List[str], tool_rewards: L
 
 # 目前实现了<think>, <tool_call> or <response>标签的格式检查，以及<tool_call>和<response>的互斥检查
 # 实现了三者的顺序检查
-# tool_call的内部格式，工具调用参数这些后续或许可以加
 def format_reward(predict_str: str, ground_truth: str):
     """Reward function that checks if the completion has the correct format with <think>, <tool_call> or <response> tags."""
     reward = 0.0
@@ -128,6 +129,8 @@ def format_reward(predict_str: str, ground_truth: str):
         if response_match:
             # 提取答案
             answer = response_match.group(1).strip()
+            if "\\boxed{" in answer:
+                answer = answer.split("\\boxed{")[1].split("}")[0].strip()
             reward = 1.0
         
         # 如果只有tool_call，之前忘记了这个

@@ -1,13 +1,15 @@
 data:
-  train_files: /mnt/petrelfs/share_data/songmingyang/data/vl_reasoning/tool_dataset/toolrl_v1_gemmareachqa@train
-  val_files: /mnt/petrelfs/share_data/songmingyang/data/vl_reasoning/tool_dataset/toolrl_v1_gemmareachqa@validation
+  # train_files: /mnt/petrelfs/share_data/songmingyang/data/vl_reasoning/tool_dataset/toolrl_v1_gemmareachqa@train
+  # val_files: /mnt/petrelfs/share_data/songmingyang/data/vl_reasoning/tool_dataset/toolrl_v1_gemmareachqa@validation
+  train_files: /mnt/petrelfs/sunhaoyu/visual-code/datasets/tool_rlset_v1@train
+  val_files: /mnt/petrelfs/sunhaoyu/visual-code/datasets/tool_rlset_v1@validation
   prompt_key: problem
   answer_key: answer
   image_key: images
   max_prompt_length: 32678
-  max_response_length: 4096
-  rollout_batch_size: 512
-  # rollout_batch_size: 64
+  max_response_length: 2048
+  rollout_batch_size: 128 # 对于7b模型采用64
+  # rollout_batch_size: 256
   val_batch_size: 1024
   format_prompt: /mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/format_prompt/tool.jinja
   override_chat_template: null
@@ -26,7 +28,7 @@ algorithm:
 
 worker:
   actor:
-    global_batch_size: 128
+    global_batch_size: 64
     micro_batch_size_per_device_for_update: 4
     micro_batch_size_per_device_for_experience: 16
     max_grad_norm: 1.0
@@ -44,7 +46,7 @@ worker:
       lr_warmup_ratio: 0.0
     fsdp:
       enable_full_shard: true
-      enable_cpu_offload: false # 设置为True，可以减少GPU内存使用，但是会变慢
+      enable_cpu_offload: false
       enable_rank0_init: true
     offload:
       offload_params: true  # true: more CPU memory; false: more GPU memory
@@ -53,7 +55,8 @@ worker:
   rollout:
     n: 6
     temperature: 1.0
-    conversation_log_name: qwen2_5_3b_tool_grpo_spot
+    ###
+    conversation_log_name: direct_refine
     top_p: 0.99
     gpu_memory_utilization: 0.8
     enforce_eager: false
@@ -83,23 +86,25 @@ worker:
     reward_function: /mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/reward_function/tool.py:compute_score
 
 trainer:
-  total_epochs: 15
+  total_epochs: 20
   max_steps: null
   project_name: easy_r1
-  experiment_name: qwen2_5_3b_tool_grpo_spot
+  ###
+  experiment_name: direct_refine
   logger: ["console", "wandb"]
   nnodes: 1
   ###
   n_gpus_per_node: 4
-  val_freq: 5  # -1 to disable # 什么时候进行验证
+  val_freq: 5  # -1 to disable
   val_before_train: false
   val_only: false
   val_generations_to_log: 3
-  save_freq: 1  # 更改为1，以便更频繁地保存检查点
+  save_freq: 1  # -1 to disable
   save_limit: 2  # -1 to disable
   # 如果要从断点继续训练，则设置save_checkpoint_path为断点路径
   # save_checkpoint_path: "你的保存路径"  # 例如 "checkpoints/easy_r1/qwen2_5_3b_tool_grpo"
   # load_checkpoint_path: "你的检查点路径"  # 例如 "checkpoints/easy_r1/qwen2_5_3b_tool_grpo/global_step_100"
   # 检查点路径格式必须是 global_step_* 的形式，这在 ray_trainer.py 的 _load_checkpoint 函数中有明确要求
-  save_checkpoint_path: /mnt/petrelfs/sunhaoyu/visual-code/EasyR1/examples/checkpoints_spot/easy_r1/qwen2_5_3b_tool_grpo
+  ###
+  save_checkpoint_path: /mnt/petrelfs/sunhaoyu/visual-code/EasyR1/checkpoints/checkpoints_direct_refine
   load_checkpoint_path: null

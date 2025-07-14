@@ -31,8 +31,12 @@ def is_rank0() -> int:
 def print_gpu_memory_usage(prefix: str = "GPU memory usage") -> None:
     """Report the current GPU VRAM usage."""
     if is_rank0():
-        free_mem, total_mem = torch.cuda.mem_get_info()
-        print(f"{prefix}: {(total_mem - free_mem) / (1024**3):.2f} GB / {total_mem / (1024**3):.2f} GB.")
+        try:
+            free_mem, total_mem = torch.cuda.mem_get_info()
+            print(f"{prefix}: {(total_mem - free_mem) / (1024**3):.2f} GB / {total_mem / (1024**3):.2f} GB.")
+        except RuntimeError:
+            # 当没有可用GPU时，优雅地处理异常
+            print(f"{prefix}: No CUDA GPUs available. Running in CPU mode.")
 
 
 def _get_model_size(model: nn.Module, scale: str = "auto") -> Tuple[float, str]:

@@ -292,10 +292,10 @@ class vLLMRollout(BaseRollout):
                     response_ids.append(all_model_response_ids)
             response_text_list = np.array(response_text_list, dtype=object)
             if response_text_list.ndim > 1:
-                debug_text = f"response_text_list shape: {response_text_list.shape},tool_inferencer_output: {tool_inferencer_output}"
-                debug_file = "/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs/error_ndims.txt"
-                with open(debug_file, "w", encoding="utf-8") as f:
-                    f.write(debug_text)
+                # debug_text = f"response_text_list shape: {response_text_list.shape},tool_inferencer_output: {tool_inferencer_output}"
+                # debug_file = "/mnt/petrelfs/sunhaoyu/visual-code/EasyR1/scripts/logs/error_ndims.txt"
+                # with open(debug_file, "w", encoding="utf-8") as f:
+                #     f.write(debug_text)
                 response_text_list = response_text_list.flatten()
             non_tensor_batch["response_text_list"] = response_text_list
             # breakpoint()       

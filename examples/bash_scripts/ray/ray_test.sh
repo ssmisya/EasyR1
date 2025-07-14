@@ -14,20 +14,14 @@ unset HTTP_PROXY
 # unset https_proxy
 # unset HTTPS_PROXY
 
-###
 code_base=/mnt/petrelfs/sunhaoyu/visual-code/EasyR1
 cd $code_base
-
-
-
-job_id=4671281
 
 
 export VLLM_WORKER_MULTIPROC_METHOD="spawn"
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # mkdir -p /mnt/petrelfs/songmingyang/tmp/ray/log1
 # ln -s /mnt/petrelfs/songmingyang/tmp /tmp/smy1
-###
 export TMPDIR="/mnt/petrelfs/sunhaoyu/visual-code/tmp1"
 # unset TMPDIR
 HYDRA_FULL_ERROR=1
@@ -37,17 +31,16 @@ HYDRA_FULL_ERROR=1
 
 # unset SLURM_JOB_ID
 export RAY_memory_monitor_refresh_ms=0
-###
 gpus=4
 cpus=56
-quotatype="reserved"
+quotatype="spot"
 
 ###
-cluster_addr=SH-IDC1-10-140-37-138
+cluster_addr=SH-IDC1-10-140-37-132
 ###
-cluster_ip=10.140.37.138
+cluster_ip=10.140.37.132
 ###
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=1,2,5,6
 
 port=6312
 dashboard_port=8212

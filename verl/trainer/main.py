@@ -72,6 +72,7 @@ class Runner:
             RewardManager = SequentialFunctionRewardManager
         elif config.worker.reward.reward_type == "batch":
             RewardManager = BatchFunctionRewardManager
+        # 是tool_batch
         elif config.worker.reward.reward_type == "tool_batch":
             RewardManager = ToolBatchFunctionRewardManager
         else:

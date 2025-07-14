@@ -255,6 +255,7 @@ In your response, you can use the following tools:
             "required": ["image", "coordinates"]
         }
     }
+}
 Steps for Each Turn
 1. **Think:** First, silently analyze the user's request to understand the goal. This thinking process should be enclosed in <think> and </think> tags.
 2. **Decide Action:** Based on your thinking, decide on one of the following two actions:
@@ -272,6 +273,7 @@ Your output must always begin with your thought process. After the <think> block
 <think> Your thoughts and reasoning </think>  
 <response> Your final response </response>
 
+
 Important Notes:
 1. You must always include the <think> field to outline your reasoning. Provide one of <tool_call> or <response>. **You must not include both <tool_call> and <response> in the same turn because they are mutually exclusive.** If tool usage is required, you must instead include both <think> and <tool_call>, and omit <response> for that turn. If no further tool usage is required and ready to answer the user's question, you can then use <think> to summarize your reasoning and include <response> with your final answer, and this indicates the ends of the conversation.
 
@@ -285,7 +287,6 @@ The index "n" in "img_n" refers to the image's position in the dialogue history:
 For example:{"parameters": {"image": "img_1", "other_params": "other_values"}}
 4. All image coordinates used must be in absolute pixel values, not relative or normalized coordinates. 
 
-5. Please put your final answer inside <response></response>, with no additional explanations or comments.
+5. At the end, provide your final answer by placing it inside \\bboxed{}, and wrap the entire final output inside <response></response> tags.
+
 {{ content | trim }} 
-
-
